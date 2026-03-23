@@ -84,8 +84,8 @@ impl Engine {
         Ok(count)
     }
 
-    /// Execute a relation rule along a specific path. For each existing root
-    /// node that belongs to `from_table`, follow the path and attach child
+    /// Execute a relation rule along a specific path. For each node anywhere in
+    /// the tree that belongs to `from_table`, follow the path and attach child
     /// nodes (fetching any missing intermediate/target rows).
     pub async fn apply_relation_rule(
         &mut self,
@@ -95,29 +95,12 @@ impl Engine {
         if path.steps.is_empty() {
             return Ok(0);
         }
+        let from_table = path.steps[0].from_table.clone();
         let mut total = 0;
-        // We iterate over root indices to avoid borrow issues
-        let n = self.roots.len();
-        for i in 0..n {
-            if self.roots[i].table == path.steps[0].from_table {
-                let added = self
-                    .attach_path(db, i, path, 0)
-                    .await?;
-                total += added;
-            }
+        for root in &mut self.roots {
+            total += attach_to_all_matching(db, root, &from_table, path).await?;
         }
         Ok(total)
-    }
-
-    /// Attach path steps to a root node, recursively traversing all steps.
-    async fn attach_path(
-        &mut self,
-        db: &dyn Database,
-        node_idx: usize,
-        path: &TablePath,
-        step_idx: usize,
-    ) -> Result<usize> {
-        attach_path_to_node(db, &mut self.roots[node_idx], path, step_idx).await
     }
 
     /// Execute a rule (dispatching to filter or relation).
@@ -225,6 +208,29 @@ fn attach_path_to_node<'a>(
             node.children.push(child);
         }
         Ok(count)
+    })
+}
+
+/// Walk `node` and all its descendants, calling `attach_path_to_node` for every
+/// node whose table matches `from_table`. Once a match is found, the path
+/// traversal handles descending into that subtree; we only recurse through
+/// non-matching nodes to search deeper.
+fn attach_to_all_matching<'a>(
+    db: &'a dyn Database,
+    node: &'a mut DataNode,
+    from_table: &'a str,
+    path: &'a TablePath,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + 'a>> {
+    Box::pin(async move {
+        if node.table == from_table {
+            attach_path_to_node(db, node, path, 0).await
+        } else {
+            let mut total = 0;
+            for child in &mut node.children {
+                total += attach_to_all_matching(db, child, from_table, path).await?;
+            }
+            Ok(total)
+        }
     })
 }
 
@@ -498,6 +504,47 @@ mod tests {
         let mut out = Vec::new();
         walk(nodes, "", &mut out);
         out
+    }
+
+    #[tokio::test]
+    async fn test_apply_relation_rule_on_nested_nodes() {
+        // Reproduces: relation rules only applied to root-level nodes, missing
+        // deeper matches after a prior relation rule created children.
+        let db = setup_test_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+        let mut engine = Engine::new(schema);
+
+        // 1. Load users as roots.
+        engine.apply_filter_rule(&db, "users", &[]).await.unwrap();
+        assert_eq!(engine.roots.len(), 2);
+
+        // 2. Attach orders to users (users → orders).
+        let users_to_orders = TablePath {
+            steps: vec![PathStep {
+                from_table: "users".to_string(),
+                from_column: "id".to_string(),
+                to_table: "orders".to_string(),
+                to_column: "user_id".to_string(),
+            }],
+        };
+        engine.apply_relation_rule(&db, &users_to_orders).await.unwrap();
+        assert_eq!(engine.roots[0].children.len(), 1, "each user should have 1 order");
+
+        // 3. Attach order_items to orders — orders are *children*, not roots.
+        let orders_to_items = TablePath {
+            steps: vec![PathStep {
+                from_table: "orders".to_string(),
+                from_column: "id".to_string(),
+                to_table: "order_items".to_string(),
+                to_column: "order_id".to_string(),
+            }],
+        };
+        engine.apply_relation_rule(&db, &orders_to_items).await.unwrap();
+
+        let order = &engine.roots[0].children[0];
+        assert_eq!(order.table, "orders");
+        assert_eq!(order.children.len(), 1, "order should have 1 order_item child");
+        assert_eq!(order.children[0].table, "order_items");
     }
 
     #[tokio::test]

@@ -88,7 +88,8 @@ fn render_data_viewer(
     let flat = flatten_tree(roots);
     state.visible_row_count = flat.len();
 
-    let inner_height = area.height.saturating_sub(2) as usize;
+    // Subtract 2 for block borders and 2 for the column detail bar at the bottom.
+    let inner_height = area.height.saturating_sub(4) as usize;
 
     // Adjust scroll so the selected row is always visible
     if state.selected_row >= state.scroll_offset + inner_height {
