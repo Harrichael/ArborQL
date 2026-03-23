@@ -1,8 +1,8 @@
-# ArborQL 🌲
+# LatticeQL 🌲
 
 Navigate complex relational datasets intuitively in a unified terminal interface.
 
-ArborQL connects to a SQL database, automatically explores the schema (tables, columns and foreign-key relationships), and lets you build up a hierarchical view of the data by typing simple rules in a command bar — no SQL required.
+LatticeQL connects to a SQL database, automatically explores the schema (tables, columns and foreign-key relationships), and lets you build up a hierarchical view of the data by typing simple rules in a command bar — no SQL required.
 
 ---
 
@@ -10,11 +10,11 @@ ArborQL connects to a SQL database, automatically explores the schema (tables, c
 
 | Feature | Description |
 |---------|-------------|
-| **Auto schema discovery** | On startup, ArborQL reads every table's columns and foreign-key graph |
+| **Auto schema discovery** | On startup, LatticeQL reads every table's columns and foreign-key graph |
 | **Filter rules** | Load rows matching a condition: `users where name startswith 'Rick'` |
 | **Relation rules** | Traverse FK links between tables: `users to orders` |
 | **Explicit path** | Pin the exact join path: `users to locations via departments` |
-| **Path selection** | When multiple FK paths exist, ArborQL presents a list to pick from |
+| **Path selection** | When multiple FK paths exist, LatticeQL presents a list to pick from |
 | **Tree view** | Related rows are shown as collapsible children (`▼`/`▶`) |
 | **Column expansion** | Choose which columns to show for any individual row |
 | **Rule reordering** | Drag rules up/down and replay them in a new order |
@@ -27,10 +27,10 @@ ArborQL connects to a SQL database, automatically explores the schema (tables, c
 
 ```bash
 # Clone and build (requires Rust 1.70+)
-git clone https://github.com/Harrichael/ArborQL.git
-cd ArborQL
+git clone https://github.com/Harrichael/LatticeQL.git
+cd LatticeQL
 cargo build --release
-# Binary is now at  ./target/release/arborql
+# Binary is now at  ./target/release/latticeql
 ```
 
 ---
@@ -57,11 +57,11 @@ users ───► posts ◄─── comments (polymorphic: Post / Photo)
                  ◄─── taggings (polymorphic: Post / Photo) ───► tags
 ```
 
-**Start ArborQL:**
+**Start LatticeQL:**
 
 ```bash
-./target/release/arborql --database sqlite://samples/ecommerce.db
-./target/release/arborql --database sqlite://samples/blog.db
+./target/release/latticeql --database sqlite://samples/ecommerce.db
+./target/release/latticeql --database sqlite://samples/blog.db
 ```
 
 ### Example session (ecommerce)
@@ -93,7 +93,7 @@ Once the TUI is running, press `:` to enter a command:
 ## Usage
 
 ```
-arborql --database <URL>
+latticeql --database <URL>
 ```
 
 | Database | URL format |
@@ -147,7 +147,7 @@ orders where status = 'pending' and total_cents > '10000'
 <from_table> to <to_table> via <intermediate>[, <intermediate> ...]
 ```
 
-If ArborQL finds more than one FK path between the two tables it presents a selection dialog; the chosen path is saved in the rule as a `via` clause so it can be replayed consistently.
+If LatticeQL finds more than one FK path between the two tables it presents a selection dialog; the chosen path is saved in the rule as a `via` clause so it can be replayed consistently.
 
 Examples:
 ```
@@ -159,6 +159,35 @@ users to locations via departments
 ### Rule reorder overlay (`r`)
 
 Press `r` to open the rule list.  Use `u` / `d` to swap a rule up or down, then press `Enter` to re-execute all rules in the new order (the data tree is rebuilt from scratch).  Press `Esc` to cancel without changes.
+
+---
+
+## Configuration
+
+LatticeQL loads Jsonnet config from `.latticeql/config.jsonnet` using this precedence:
+
+1. `~/.latticeql/config.jsonnet`
+2. then `.latticeql/config.jsonnet` discovered from the current directory upward, stopping at your home directory
+3. later (nearer) files override earlier ones
+
+Example:
+
+```jsonnet
+{
+  columns: {
+    // Global default columns for tree rows
+    default: ["id", "name"],
+
+    // Table-specific overrides
+    tables: {
+      users: { default: ["id", "email"] },
+      orders: { default: ["id", "status"] },
+    },
+  },
+}
+```
+
+If no config is found, LatticeQL defaults to `["id", "name"]`.
 
 ---
 
@@ -191,4 +220,3 @@ samples/
 
 Bug reports and pull requests are welcome on GitHub.  
 Please open an issue first for larger feature ideas.
-

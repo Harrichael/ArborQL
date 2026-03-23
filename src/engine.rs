@@ -1,5 +1,5 @@
 use crate::db::{Database, Row};
-use crate::rules::{Rule, conditions_to_sql};
+use crate::rules::{Rule, conditions_to_sql, row_matches_conditions};
 use crate::schema::{Schema, TablePath};
 use anyhow::Result;
 
@@ -84,7 +84,15 @@ impl Engine {
         Ok(count)
     }
 
-    /// Execute a relation rule along a specific path. For each node anywhere in
+    /// Remove all nodes in the tree where the table matches and all conditions hold.
+    /// Pruning is recursive: if a parent is pruned, its children are removed too.
+    pub fn apply_prune_rule(
+        &mut self,
+        table: &str,
+        conditions: &[crate::rules::Condition],
+    ) {
+        prune_nodes(&mut self.roots, table, conditions);
+    }
     /// the tree that belongs to `from_table`, follow the path and attach child
     /// nodes (fetching any missing intermediate/target rows).
     pub async fn apply_relation_rule(
@@ -110,7 +118,7 @@ impl Engine {
         &mut self,
         db: &dyn Database,
         rule: Rule,
-    ) -> Result<Option<Vec<TablePath>>> {
+    ) -> Result<Option<crate::schema::PathSearchResult>> {
         match &rule {
             Rule::Filter { table, conditions } => {
                 let table = table.clone();
@@ -142,22 +150,42 @@ impl Engine {
                         via,
                     );
                     if let Some(path) = path {
+                        crate::log::info(format!(
+                            "Traversal: built explicit path {} via [{}]",
+                            path.steps.iter().map(|s| format!("{}.{} → {}.{}", s.from_table, s.from_column, s.to_table, s.to_column)).collect::<Vec<_>>().join(", "),
+                            via.join(", ")
+                        ));
                         self.apply_relation_rule(db, &path).await?;
                         self.rules.push(rule);
                         return Ok(None);
+                    } else {
+                        crate::log::warn(format!(
+                            "Traversal: could not build explicit path {} → {} via [{}] — no FK chain found; falling back to BFS",
+                            from_table, to_table, via.join(", ")
+                        ));
                     }
                 }
-                // Find all paths
-                let paths =
-                    crate::schema::find_paths(&self.schema, from_table, to_table);
-                if paths.is_empty() {
+                let result =
+                    crate::schema::find_paths(&self.schema, from_table, to_table, via);
+                if result.paths.is_empty() {
+                    // Log which tables have FKs to help the user understand the schema
+                    let schema_fk_summary: Vec<String> = self.schema.tables.iter()
+                        .filter(|(_, info)| !info.foreign_keys.is_empty())
+                        .map(|(name, info)| format!("{}: [{}]", name,
+                            info.foreign_keys.iter().map(|fk| format!("{} → {}.{}", fk.from_column, fk.to_table, fk.to_column)).collect::<Vec<_>>().join(", ")))
+                        .collect();
+                    crate::log::warn(format!(
+                        "No path found between '{}' and '{}' via [{}]. Known FK relationships: {}",
+                        from_table, to_table, via.join(", "),
+                        if schema_fk_summary.is_empty() { "none (no FK constraints in schema)".to_string() } else { schema_fk_summary.join("; ") }
+                    ));
                     anyhow::bail!(
-                        "No path found between '{}' and '{}'",
+                        "No path found between '{}' and '{}' — check 'l' logs for schema FK details",
                         from_table,
                         to_table
                     );
-                } else if paths.len() == 1 {
-                    let path = paths.into_iter().next().unwrap();
+                } else if result.paths.len() == 1 && !result.has_more {
+                    let path = result.paths.into_iter().next().unwrap();
                     self.apply_relation_rule(db, &path).await?;
                     // Store the resolved path so re-execution is deterministic.
                     let stored = Rule::Relation {
@@ -170,8 +198,15 @@ impl Engine {
                     Ok(None)
                 } else {
                     // Multiple paths — let the UI ask the user to pick
-                    Ok(Some(paths))
+                    Ok(Some(result))
                 }
+            }
+            Rule::Prune { table, conditions } => {
+                let table = table.clone();
+                let conditions = conditions.clone();
+                self.apply_prune_rule(&table, &conditions);
+                self.rules.push(rule);
+                Ok(None)
             }
         }
     }
@@ -188,6 +223,19 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// Remove nodes matching `table` + `conditions` from the list, recursing into
+/// children of non-matching nodes. A matched node is dropped with all its children.
+fn prune_nodes(nodes: &mut Vec<DataNode>, table: &str, conditions: &[crate::rules::Condition]) {
+    nodes.retain_mut(|node| {
+        if node.table == table && row_matches_conditions(&node.row, conditions) {
+            false // drop this node and all its children
+        } else {
+            prune_nodes(&mut node.children, table, conditions);
+            true
+        }
+    });
 }
 
 /// Recursively attach path steps starting at `step_idx` to `node`, fetching
@@ -215,30 +263,52 @@ fn attach_path_to_node<'a>(
 
         // Get the FK value from this node
         let fk_val = match node.row.get(&step.from_column) {
-            Some(v) => v.to_string(),
-            None => return Ok(0),
+            Some(crate::db::Value::Null) | None => {
+                crate::log::info(format!(
+                    "Traversal step {}: skipping node in '{}' — FK column '{}' is null/missing",
+                    step_idx + 1, node.table, step.from_column
+                ));
+                return Ok(0);
+            }
+            Some(v) => v.clone(),
+        };
+
+        // Format FK value for SQL literal
+        let fk_sql_lit = match &fk_val {
+            crate::db::Value::Integer(i) => i.to_string(),
+            crate::db::Value::Float(f) => f.to_string(),
+            crate::db::Value::Bytes(b) => {
+                // Binary values (e.g. binary(16) UUIDs) must use MySQL hex literal X'...'
+                let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+                format!("X'{}'", hex)
+            }
+            other => format!("'{}'", other.to_string().replace('\'', "''")),
         };
 
         // Build SQL, optionally with extra WHERE clause for reverse poly steps
         let sql = if let Some(extra) = &step.target_extra_where {
             format!(
-                "SELECT * FROM {} WHERE {} = '{}' AND {}",
+                "SELECT * FROM {} WHERE {} = {} AND {}",
                 step.to_table,
                 step.to_column,
-                fk_val.replace('\'', "''"),
+                fk_sql_lit,
                 extra
             )
         } else {
             format!(
-                "SELECT * FROM {} WHERE {} = '{}'",
+                "SELECT * FROM {} WHERE {} = {}",
                 step.to_table,
                 step.to_column,
-                fk_val.replace('\'', "''")
+                fk_sql_lit
             )
         };
 
         let rows = db.query(&sql).await?;
         let count = rows.len();
+        crate::log::info(format!(
+            "Traversal step {}/{}: {} — {} row(s) returned",
+            step_idx + 1, path.steps.len(), sql, count
+        ));
         for row in rows {
             let mut child = DataNode::new(step.to_table.clone(), row);
             attach_path_to_node(db, &mut child, path, step_idx + 1).await?;
@@ -463,20 +533,41 @@ mod tests {
         );
     }
 
-    /// Create an in-memory SQLite database with a 3-table schema mirroring the
-    /// users → orders → order_items → products chain.
+    /// Create an in-memory SQLite database with users/orders/products and
+    /// departments -> users, users -> products relations.
     async fn setup_test_db() -> crate::db::sqlite::SqliteDb {
         use sqlx::SqlitePool;
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let stmts = [
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE departments (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, department_id INTEGER NOT NULL REFERENCES departments(id))",
             "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))",
             "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
             "CREATE TABLE order_items (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), product_id INTEGER NOT NULL REFERENCES products(id))",
-            "INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')",
-            "INSERT INTO orders VALUES (10, 1), (11, 2)",
+            "INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Sales')",
+            "INSERT INTO users VALUES (1, 'Alice', 1), (2, 'Bob', 2)",
             "INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')",
+            "INSERT INTO orders VALUES (10, 1), (11, 2)",
             "INSERT INTO order_items VALUES (1000, 10, 100), (1001, 11, 101)",
+        ];
+        for stmt in &stmts {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        crate::db::sqlite::SqliteDb::from_pool(pool)
+    }
+
+    /// Dedicated DB for departments -> users -> products tests with an
+    /// unambiguous users -> products path.
+    async fn setup_departments_users_products_db() -> crate::db::sqlite::SqliteDb {
+        use sqlx::SqlitePool;
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let stmts = [
+            "CREATE TABLE departments (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, department_id INTEGER NOT NULL REFERENCES departments(id), favorite_product_id INTEGER NOT NULL REFERENCES products(id))",
+            "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Sales')",
+            "INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')",
+            "INSERT INTO users VALUES (1, 'Alice', 1, 100), (2, 'Bob', 2, 101)",
         ];
         for stmt in &stmts {
             sqlx::query(stmt).execute(&pool).await.unwrap();
@@ -661,6 +752,31 @@ mod tests {
         assert_eq!(
             restored_sig, baseline_sig,
             "restored response should match original baseline response"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_departments_users_products_sequence_reaches_nested_users() {
+        let db = setup_departments_users_products_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+        let mut engine = Engine::new(schema);
+
+        let rule_departments = rules::parse_rule("departments").unwrap();
+        let rule_departments_users = rules::parse_rule("departments to users").unwrap();
+        let rule_users_products = rules::parse_rule("users to products").unwrap();
+
+        engine.execute_rule(&db, rule_departments).await.unwrap();
+        engine.execute_rule(&db, rule_departments_users).await.unwrap();
+        engine.execute_rule(&db, rule_users_products).await.unwrap();
+
+        let sig = tree_signature(&engine.roots);
+        assert!(
+            sig.iter().any(|s| s.contains(":users#")),
+            "departments to users should attach users"
+        );
+        assert!(
+            sig.iter().any(|s| s.contains(":products#")),
+            "users to products should reach users nested under departments"
         );
     }
 }

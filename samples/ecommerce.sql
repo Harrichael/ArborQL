@@ -1,4 +1,4 @@
--- ArborQL sample schema: a small e-commerce / team directory dataset.
+-- LatticeQL sample schema: a small e-commerce / team directory dataset.
 -- Run:  sqlite3 sample/sample.db < sample/schema.sql
 
 PRAGMA foreign_keys = ON;
@@ -112,12 +112,12 @@ INSERT INTO users VALUES
     (10, 'Princess Carolyn','pc@example.com',      'admin',  5, 5);
 
 INSERT INTO products VALUES
-    (1,  'ArborQL Pro License',   'Software',    9999,  'AQL-PRO-001'),
+    (1,  'LatticeQL Pro License',   'Software',    9999,  'AQL-PRO-001'),
     (2,  'Mechanical Keyboard',   'Hardware',    14999, 'HW-KBD-001'),
     (3,  'USB-C Hub 7-port',      'Hardware',    4999,  'HW-HUB-001'),
     (4,  'Standing Desk Mat',     'Office',      3499,  'OFF-MAT-001'),
     (5,  'Noise-Cancelling Headphones', 'Hardware', 19999, 'HW-HEAD-001'),
-    (6,  'ArborQL Team License',  'Software',    49999, 'AQL-TEAM-001'),
+    (6,  'LatticeQL Team License',  'Software',    49999, 'AQL-TEAM-001'),
     (7,  'Ergonomic Mouse',       'Hardware',    7999,  'HW-MSE-001'),
     (8,  'Monitor Arm',           'Office',      8999,  'OFF-ARM-001'),
     (9,  'Webcam 4K',             'Hardware',    9999,  'HW-CAM-001'),

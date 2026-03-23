@@ -67,6 +67,17 @@ pub trait Database: Send + Sync {
     /// Return full metadata for a table.
     async fn describe_table(&self, table: &str) -> Result<TableInfo>;
 
+    /// Return metadata for ALL tables in one shot.
+    /// Default implementation calls `describe_table` per table; backends can
+    /// override to use a single batched query (important for MySQL performance).
+    async fn describe_all_tables(&self, tables: &[String]) -> Result<Vec<TableInfo>> {
+        let mut result = Vec::new();
+        for t in tables {
+            result.push(self.describe_table(t).await?);
+        }
+        Ok(result)
+    }
+
     /// Execute a raw SELECT and return rows.
     async fn query(&self, sql: &str) -> Result<Vec<Row>>;
 }
