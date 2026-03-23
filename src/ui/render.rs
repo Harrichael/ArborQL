@@ -278,13 +278,21 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
     let area = centered_rect(70, 60, f.area());
     f.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = state
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let offset = if state.path_cursor >= inner_height {
+        state.path_cursor + 1 - inner_height
+    } else {
+        0
+    };
+
+    let mut items: Vec<ListItem> = state
         .paths
         .iter()
         .enumerate()
+        .skip(offset)
+        .take(inner_height)
         .map(|(i, p)| {
-            let text = p.to_string();
-            let item = ListItem::new(text);
+            let item = ListItem::new(p.to_string());
             if i == state.path_cursor {
                 item.style(Style::default().bg(Color::Blue).fg(Color::White))
             } else {
@@ -292,6 +300,13 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
             }
         })
         .collect();
+
+    if state.paths_has_more && items.len() < inner_height {
+        items.push(
+            ListItem::new("  … (more paths exist)")
+                .style(Style::default().fg(Color::DarkGray)),
+        );
+    }
 
     let list = List::new(items).block(
         Block::default()

@@ -186,36 +186,74 @@ fn decode_mysql_value(
 ) -> Value {
     use sqlx::Row as _;
     let upper = type_name.to_uppercase();
-    if upper.contains("INT") || upper.contains("BIT") || upper.contains("YEAR") {
-        match row.try_get::<i64, _>(idx) {
-            Ok(v) => Value::Integer(v),
-            Err(_) => Value::Null,
+
+    // Integer families (try signed, then unsigned, then bool for TINYINT(1))
+    if upper.contains("INT") || upper == "YEAR" {
+        if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(idx) {
+            return Value::Integer(v);
         }
-    } else if upper.contains("FLOAT")
-        || upper.contains("DOUBLE")
-        || upper.contains("DECIMAL")
-        || upper.contains("NUMERIC")
-    {
-        match row.try_get::<f64, _>(idx) {
-            Ok(v) => Value::Float(v),
-            Err(_) => Value::Null,
+        if let Ok(Some(v)) = row.try_get::<Option<u64>, _>(idx) {
+            return Value::Integer(v as i64);
         }
-    } else if upper.contains("BLOB") || upper.contains("BINARY") {
-        // Try String first (covers VARBINARY used for text in some collations)
-        match row.try_get::<String, _>(idx) {
-            Ok(v) => Value::Text(v),
-            Err(_) => match row.try_get::<Vec<u8>, _>(idx) {
-                Ok(v) => match String::from_utf8(v.clone()) {
-                    Ok(s) => Value::Text(s),
-                    Err(_) => Value::Bytes(v),
-                },
-                Err(_) => Value::Null,
-            },
+        if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(idx) {
+            return Value::Integer(v as i64);
         }
-    } else {
-        match row.try_get::<String, _>(idx) {
-            Ok(v) => Value::Text(v),
-            Err(_) => Value::Null,
-        }
+        return Value::Null;
     }
+
+    // BIT columns come back as a byte array in sqlx MySQL
+    if upper == "BIT" {
+        if let Ok(Some(b)) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+            let v = b.iter().fold(0u64, |acc, &byte| (acc << 8) | (byte as u64));
+            return Value::Integer(v as i64);
+        }
+        return Value::Null;
+    }
+
+    if upper.contains("FLOAT") || upper.contains("DOUBLE") {
+        if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(idx) {
+            return Value::Float(v);
+        }
+        return Value::Null;
+    }
+
+    // DECIMAL/NUMERIC: sqlx returns these as strings without a decimal feature
+    if upper.contains("DECIMAL") || upper.contains("NUMERIC") {
+        if let Ok(Some(s)) = row.try_get::<Option<String>, _>(idx) {
+            if let Ok(v) = s.parse::<f64>() {
+                return Value::Float(v);
+            }
+            return Value::Text(s);
+        }
+        return Value::Null;
+    }
+
+    // Pure binary blobs (BLOB, LONGBLOB, MEDIUMBLOB, TINYBLOB — but not VARBINARY which
+    // is often used for text in MySQL information_schema)
+    if upper.contains("BLOB") || (upper.contains("BINARY") && !upper.contains("VAR")) {
+        if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+            return match String::from_utf8(v.clone()) {
+                Ok(s) => Value::Text(s),
+                Err(_) => Value::Bytes(v),
+            };
+        }
+        return Value::Null;
+    }
+
+    // Broad string catch-all: TEXT, VARCHAR, CHAR, VARBINARY, ENUM, SET,
+    // DATE, DATETIME, TIMESTAMP, TIME, JSON — all decodable as String in sqlx
+    // when the chrono/time feature is absent.
+    if let Ok(Some(s)) = row.try_get::<Option<String>, _>(idx) {
+        return Value::Text(s);
+    }
+
+    // Last resort: raw bytes
+    if let Ok(Some(b)) = row.try_get::<Option<Vec<u8>>, _>(idx) {
+        return match String::from_utf8(b.clone()) {
+            Ok(s) => Value::Text(s),
+            Err(_) => Value::Bytes(b),
+        };
+    }
+
+    Value::Null
 }

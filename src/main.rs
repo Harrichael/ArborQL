@@ -384,17 +384,18 @@ async fn handle_key(
                             })
                             .unwrap_or_else(|| "id".to_string());
                         if let Some(pk_val) = node.row.get(&pk_col) {
+                            let conditions = vec![rules::Condition {
+                                column: pk_col,
+                                op: rules::Op::Eq,
+                                value: pk_val.to_string(),
+                            }];
                             let rule = rules::Rule::Prune {
-                                table,
-                                conditions: vec![rules::Condition {
-                                    column: pk_col,
-                                    op: rules::Op::Eq,
-                                    value: pk_val.to_string(),
-                                }],
+                                table: table.clone(),
+                                conditions: conditions.clone(),
                             };
-                            if insert_rule_at_next_cursor(state, engine, rule) {
-                                engine.reexecute_all(db).await?;
-                            }
+                            insert_rule_at_next_cursor(state, engine, rule);
+                            // Prune is in-memory: apply directly without re-fetching from DB.
+                            engine.apply_prune_rule(&table, &conditions);
                         }
                     }
                 }
@@ -804,12 +805,13 @@ async fn execute_command(
                         engine.reexecute_all(db).await?;
                     }
                 }
-                Ok(Some(paths)) => {
+                Ok(Some(result)) => {
                     // Multiple paths — ask user to pick
-                    state.paths = paths.clone();
+                    state.paths = result.paths.clone();
+                    state.paths_has_more = result.has_more;
                     state.path_cursor = 0;
                     state.mode = Mode::PathSelection;
-                    *pending_paths = Some((rule, paths));
+                    *pending_paths = Some((rule, result.paths));
                 }
             }
         }

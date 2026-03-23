@@ -118,7 +118,7 @@ impl Engine {
         &mut self,
         db: &dyn Database,
         rule: Rule,
-    ) -> Result<Option<Vec<TablePath>>> {
+    ) -> Result<Option<crate::schema::PathSearchResult>> {
         match &rule {
             Rule::Filter { table, conditions } => {
                 let table = table.clone();
@@ -155,17 +155,16 @@ impl Engine {
                         return Ok(None);
                     }
                 }
-                // Find all paths
-                let paths =
-                    crate::schema::find_paths(&self.schema, from_table, to_table);
-                if paths.is_empty() {
+                let result =
+                    crate::schema::find_paths(&self.schema, from_table, to_table, via);
+                if result.paths.is_empty() {
                     anyhow::bail!(
                         "No path found between '{}' and '{}'",
                         from_table,
                         to_table
                     );
-                } else if paths.len() == 1 {
-                    let path = paths.into_iter().next().unwrap();
+                } else if result.paths.len() == 1 && !result.has_more {
+                    let path = result.paths.into_iter().next().unwrap();
                     self.apply_relation_rule(db, &path).await?;
                     // Store the resolved path so re-execution is deterministic.
                     let stored = Rule::Relation {
@@ -178,7 +177,7 @@ impl Engine {
                     Ok(None)
                 } else {
                     // Multiple paths — let the UI ask the user to pick
-                    Ok(Some(paths))
+                    Ok(Some(result))
                 }
             }
             Rule::Prune { table, conditions } => {
@@ -243,25 +242,32 @@ fn attach_path_to_node<'a>(
 
         // Get the FK value from this node
         let fk_val = match node.row.get(&step.from_column) {
-            Some(v) => v.to_string(),
-            None => return Ok(0),
+            Some(crate::db::Value::Null) | None => return Ok(0),
+            Some(v) => v.clone(),
+        };
+
+        // Format FK value: integers unquoted, everything else single-quoted
+        let fk_sql_lit = match &fk_val {
+            crate::db::Value::Integer(i) => i.to_string(),
+            crate::db::Value::Float(f) => f.to_string(),
+            other => format!("'{}'", other.to_string().replace('\'', "''")),
         };
 
         // Build SQL, optionally with extra WHERE clause for reverse poly steps
         let sql = if let Some(extra) = &step.target_extra_where {
             format!(
-                "SELECT * FROM {} WHERE {} = '{}' AND {}",
+                "SELECT * FROM {} WHERE {} = {} AND {}",
                 step.to_table,
                 step.to_column,
-                fk_val.replace('\'', "''"),
+                fk_sql_lit,
                 extra
             )
         } else {
             format!(
-                "SELECT * FROM {} WHERE {} = '{}'",
+                "SELECT * FROM {} WHERE {} = {}",
                 step.to_table,
                 step.to_column,
-                fk_val.replace('\'', "''")
+                fk_sql_lit
             )
         };
 

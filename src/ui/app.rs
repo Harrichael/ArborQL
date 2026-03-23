@@ -80,6 +80,8 @@ pub struct AppState {
     pub cursor: usize,
     /// Paths presented to the user for selection (PathSelection mode).
     pub paths: Vec<TablePath>,
+    /// True when BFS found more than 10 paths and truncated.
+    pub paths_has_more: bool,
     /// Currently highlighted path index.
     pub path_cursor: usize,
     /// Table names from the schema, for display.
@@ -122,6 +124,7 @@ impl AppState {
             input: String::new(),
             cursor: 0,
             paths: Vec::new(),
+            paths_has_more: false,
             path_cursor: 0,
             table_names: Vec::new(),
             rules: Vec::new(),
