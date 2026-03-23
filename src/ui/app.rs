@@ -116,6 +116,12 @@ pub struct AppState {
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
     pub logs: Vec<crate::log::LogEntry>,
+    /// Scroll offset shared by all list overlays (column manager, FK manager, etc.).
+    pub overlay_scroll: usize,
+    /// Live search/filter string for list overlays. Empty = no filter.
+    pub overlay_search: String,
+    /// Whether the search input is currently active (accepting keystrokes).
+    pub overlay_search_active: bool,
 }
 
 impl AppState {
@@ -145,6 +151,9 @@ impl AppState {
             default_visible_columns_by_table: HashMap::new(),
             virtual_fks: Vec::new(),
             logs: Vec::new(),
+            overlay_scroll: 0,
+            overlay_search: String::new(),
+            overlay_search_active: false,
         }
     }
 
@@ -214,6 +223,43 @@ impl AppState {
     pub fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;
+    }
+
+    /// Clear overlay search state (call when opening/closing a list overlay).
+    pub fn reset_overlay_search(&mut self) {
+        self.overlay_search.clear();
+        self.overlay_search_active = false;
+        self.overlay_scroll = 0;
+    }
+
+    /// Get the cursor embedded in the current VirtualFkAdd step.
+    pub fn wizard_cursor(&self) -> usize {
+        match &self.mode {
+            Mode::VirtualFkAdd(s) => match s {
+                VirtualFkAddStep::PickFromTable { cursor } => *cursor,
+                VirtualFkAddStep::PickTypeColumn { cursor, .. } => *cursor,
+                VirtualFkAddStep::PickTypeValue { cursor, .. } => *cursor,
+                VirtualFkAddStep::PickIdColumn { cursor, .. } => *cursor,
+                VirtualFkAddStep::PickToTable { cursor, .. } => *cursor,
+                VirtualFkAddStep::PickToColumn { cursor, .. } => *cursor,
+            },
+            _ => 0,
+        }
+    }
+
+    /// Update the cursor embedded in the current VirtualFkAdd step.
+    pub fn wizard_set_cursor(&mut self, c: usize) {
+        match &mut self.mode {
+            Mode::VirtualFkAdd(s) => match s {
+                VirtualFkAddStep::PickFromTable { cursor } => *cursor = c,
+                VirtualFkAddStep::PickTypeColumn { cursor, .. } => *cursor = c,
+                VirtualFkAddStep::PickTypeValue { cursor, .. } => *cursor = c,
+                VirtualFkAddStep::PickIdColumn { cursor, .. } => *cursor = c,
+                VirtualFkAddStep::PickToTable { cursor, .. } => *cursor = c,
+                VirtualFkAddStep::PickToColumn { cursor, .. } => *cursor = c,
+            },
+            _ => {}
+        }
     }
 
     /// Get text entered so far.

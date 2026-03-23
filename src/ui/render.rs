@@ -397,23 +397,45 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
     f.render_widget(list, area);
 }
 
-fn render_column_add(f: &mut Frame, state: &AppState) {
-    if let Some((ref table, ref items, cursor)) = state.column_add {
-        let area = centered_rect(50, 40, f.area());
+fn render_column_add(f: &mut Frame, state: &mut AppState) {
+    if let Some((ref table, ref items, cursor)) = state.column_add.clone() {
+        let area = centered_rect(50, 70, f.area());
         f.render_widget(Clear, area);
 
-        let inner_height = area.height.saturating_sub(2) as usize;
-        let offset = if cursor >= inner_height { cursor + 1 - inner_height } else { 0 };
+        // Reserve last row for search bar
+        let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
+        let list_area = if has_search {
+            Rect { height: area.height.saturating_sub(3), ..area }
+        } else {
+            area
+        };
 
-        let list_items: Vec<ListItem> = items
+        let inner_height = list_area.height.saturating_sub(2) as usize;
+
+        // Apply search filter — cursor is index into filtered list
+        let q = state.overlay_search.to_lowercase();
+        let filtered: Vec<(usize, &crate::ui::app::ColumnManagerItem)> = items.iter()
+            .enumerate()
+            .filter(|(_, it)| q.is_empty() || it.name.to_lowercase().contains(&q))
+            .collect();
+
+        // Clamp scroll: scroll only when cursor leaves visible window
+        if cursor < state.overlay_scroll {
+            state.overlay_scroll = cursor;
+        } else if cursor >= state.overlay_scroll + inner_height {
+            state.overlay_scroll = cursor + 1 - inner_height;
+        }
+        let offset = state.overlay_scroll;
+
+        let list_items: Vec<ListItem> = filtered
             .iter()
             .enumerate()
             .skip(offset)
             .take(inner_height)
-            .map(|(i, col)| {
+            .map(|(fi, (_, col))| {
                 let marker = if col.enabled { "[x]" } else { "[ ]" };
                 let item = ListItem::new(format!("{} {}", marker, col.name));
-                if i == cursor {
+                if fi == cursor {
                     item.style(Style::default().bg(Color::Green).fg(Color::Black))
                 } else {
                     item
@@ -421,15 +443,27 @@ fn render_column_add(f: &mut Frame, state: &AppState) {
             })
             .collect();
 
+        let match_info = if !state.overlay_search.is_empty() {
+            format!("  ({} matches)", filtered.len())
+        } else {
+            String::new()
+        };
+        let reorder_hint = if state.overlay_search.is_empty() { "  u/d reorder" } else { "" };
         let list = List::new(list_items).block(
             Block::default()
                 .title(format!(
-                    " Columns for '{}' (↑↓ nav, space/x toggle, u/d reorder, Enter apply, Esc cancel) ",
-                    table
+                    " Columns for '{}'{} (↑↓ nav · space/x toggle{}· /search · Enter apply · Esc) ",
+                    table, match_info, reorder_hint
                 ))
                 .borders(Borders::ALL),
         );
-        f.render_widget(list, area);
+        f.render_widget(list, list_area);
+
+        // Search bar
+        if has_search {
+            let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
+            render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+        }
     }
 }
 
@@ -447,26 +481,55 @@ fn render_overlay_message(f: &mut Frame, message: &str, color: Color) {
     f.render_widget(para, area);
 }
 
-fn render_virtual_fk_manager(f: &mut Frame, state: &AppState) {
-    let area = centered_rect(72, 60, f.area());
+fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
+    let area = centered_rect(72, 70, f.area());
     f.render_widget(Clear, area);
 
     let cursor = if let Mode::VirtualFkManager { cursor } = state.mode { cursor } else { 0 };
 
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let offset = if cursor >= inner_height { cursor + 1 - inner_height } else { 0 };
+    // Reserve last row for search bar
+    let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
+    let list_area = if has_search {
+        Rect { height: area.height.saturating_sub(3), ..area }
+    } else {
+        area
+    };
+
+    let inner_height = list_area.height.saturating_sub(2) as usize;
+
+    // Apply search filter
+    let q = state.overlay_search.to_lowercase();
+    let filtered: Vec<(usize, &crate::schema::VirtualFkDef)> = state.virtual_fks.iter()
+        .enumerate()
+        .filter(|(_, vfk)| {
+            q.is_empty()
+                || vfk.from_table.to_lowercase().contains(&q)
+                || vfk.to_table.to_lowercase().contains(&q)
+                || vfk.type_value.to_lowercase().contains(&q)
+        })
+        .collect();
+
+    // Clamp scroll: only move when cursor leaves visible window
+    if cursor < state.overlay_scroll {
+        state.overlay_scroll = cursor;
+    } else if inner_height > 0 && cursor >= state.overlay_scroll + inner_height {
+        state.overlay_scroll = cursor + 1 - inner_height;
+    }
+    let offset = state.overlay_scroll;
 
     let items: Vec<ListItem> = if state.virtual_fks.is_empty() {
         vec![ListItem::new("  (none — press 'a' to add one)")
             .style(Style::default().fg(Color::DarkGray))]
+    } else if filtered.is_empty() {
+        vec![ListItem::new("  (no matches)")
+            .style(Style::default().fg(Color::DarkGray))]
     } else {
-        state
-            .virtual_fks
+        filtered
             .iter()
             .enumerate()
             .skip(offset)
             .take(inner_height)
-            .map(|(i, vfk)| {
+            .map(|(fi, (_, vfk))| {
                 let text = format!(
                     "  {}.{} = '{}' → {}.{}  (via {}.{})",
                     vfk.from_table, vfk.type_column, vfk.type_value,
@@ -474,7 +537,7 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &AppState) {
                     vfk.from_table, vfk.id_column,
                 );
                 let item = ListItem::new(text);
-                if i == cursor {
+                if fi == cursor {
                     item.style(Style::default().bg(Color::Blue).fg(Color::White))
                 } else {
                     item
@@ -483,33 +546,44 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &AppState) {
             .collect()
     };
 
+    let match_info = if !state.overlay_search.is_empty() {
+        format!("  ({} matches)", filtered.len())
+    } else {
+        String::new()
+    };
     let list = List::new(items).block(
         Block::default()
-            .title(" Virtual FK Manager  (↑↓ navigate · a add · d/x delete · Esc close) ")
+            .title(format!(" Virtual FK Manager{}  (↑↓ navigate · a add · d/x delete · /search · Ctrl+S save · Esc) ", match_info))
             .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(Color::Cyan)),
     );
-    f.render_widget(list, area);
+    f.render_widget(list, list_area);
+
+    // Search bar
+    if has_search {
+        let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
+        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+    }
 }
 
-fn render_virtual_fk_add(f: &mut Frame, state: &AppState) {
+fn render_virtual_fk_add(f: &mut Frame, state: &mut AppState) {
     let area = centered_rect(60, 70, f.area());
     f.render_widget(Clear, area);
 
-    let step = if let Mode::VirtualFkAdd(ref s) = state.mode { s } else { return };
+    let step = if let Mode::VirtualFkAdd(ref s) = state.mode { s.clone() } else { return };
 
     match step {
         VirtualFkAddStep::PickFromTable { cursor } => {
-            render_pick_list(f, &state.table_names, *cursor, area, Block::default()
-                .title(" Step 1/5: Table that owns the type+id columns  (↑↓ · Enter · Esc) ")
+            render_pick_list(f, state, &state.table_names.clone(), cursor, area, Block::default()
+                .title(" Step 1/5: Table that owns the type+id columns  (↑↓ · / search · Enter · Esc) ")
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Yellow)));
         }
         VirtualFkAddStep::PickTypeColumn { from_table, cursor } => {
-            let cols = state.table_columns.get(from_table).cloned().unwrap_or_default();
-            render_pick_list(f, &cols, *cursor, area, Block::default()
+            let cols = state.table_columns.get(&from_table).cloned().unwrap_or_default();
+            render_pick_list(f, state, &cols, cursor, area, Block::default()
                 .title(format!(
-                    " Step 2/5: Type discriminator column in '{}'  (↑↓ · Enter · Esc) ",
+                    " Step 2/5: Type discriminator column in '{}'  (↑↓ · / search · Enter · Esc) ",
                     from_table
                 ))
                 .borders(Borders::ALL)
@@ -520,38 +594,38 @@ fn render_virtual_fk_add(f: &mut Frame, state: &AppState) {
                 .iter()
                 .map(|(val, cnt)| format!("{}  ({})", val, cnt))
                 .collect();
-            render_pick_list(f, &option_strings, *cursor, area, Block::default()
+            render_pick_list(f, state, &option_strings, cursor, area, Block::default()
                 .title(format!(
-                    " Step 3/5: Select value of {}.{}  (↑↓ · Enter · Esc) ",
+                    " Step 3/5: Select value of {}.{}  (↑↓ · / search · Enter · Esc) ",
                     from_table, type_column
                 ))
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Yellow)));
         }
         VirtualFkAddStep::PickIdColumn { from_table, type_column, type_value, cursor } => {
-            let cols = state.table_columns.get(from_table).cloned().unwrap_or_default();
-            render_pick_list(f, &cols, *cursor, area, Block::default()
+            let cols = state.table_columns.get(&from_table).cloned().unwrap_or_default();
+            render_pick_list(f, state, &cols, cursor, area, Block::default()
                 .title(format!(
-                    " Step 4/5: ID column in '{}' (holds FK when {}='{}')  (↑↓ · Enter · Esc) ",
+                    " Step 4/5: ID column in '{}' (holds FK when {}='{}')  (↑↓ · / search · Enter · Esc) ",
                     from_table, type_column, type_value
                 ))
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Yellow)));
         }
         VirtualFkAddStep::PickToTable { type_column, type_value, id_column, cursor, .. } => {
-            render_pick_list(f, &state.table_names, *cursor, area, Block::default()
+            render_pick_list(f, state, &state.table_names.clone(), cursor, area, Block::default()
                 .title(format!(
-                    " Step 5/6: Target table for {}='{}' via {}  (↑↓ · Enter · Esc) ",
+                    " Step 5/6: Target table for {}='{}' via {}  (↑↓ · / search · Enter · Esc) ",
                     type_column, type_value, id_column
                 ))
                 .borders(Borders::ALL)
                 .style(Style::default().fg(Color::Yellow)));
         }
         VirtualFkAddStep::PickToColumn { type_column, type_value, to_table, cursor, .. } => {
-            let to_cols = state.table_columns.get(to_table).cloned().unwrap_or_default();
-            render_pick_list(f, &to_cols, *cursor, area, Block::default()
+            let to_cols = state.table_columns.get(&to_table).cloned().unwrap_or_default();
+            render_pick_list(f, state, &to_cols, cursor, area, Block::default()
                 .title(format!(
-                    " Step 6/6: Join column on '{}' for {}='{}'  (↑↓ · Enter · Esc) ",
+                    " Step 6/6: Join column on '{}' for {}='{}'  (↑↓ · / search · Enter · Esc) ",
                     to_table, type_column, type_value
                 ))
                 .borders(Borders::ALL)
@@ -560,40 +634,87 @@ fn render_virtual_fk_add(f: &mut Frame, state: &AppState) {
     }
 }
 
-/// Build a list of selectable items, highlighting the one at `cursor`.
-/// Render a scrollable pick list into `area`, keeping `cursor` visible.
+/// Render a scrollable pick list with search support.
+/// `cursor` is the index into the *filtered* list.
+/// Updates `state.overlay_scroll` to keep cursor in view.
 fn render_pick_list(
     f: &mut ratatui::Frame,
+    state: &mut AppState,
     items: &[String],
     cursor: usize,
     area: Rect,
     block: Block,
 ) {
-    let inner_height = area.height.saturating_sub(2) as usize; // subtract borders
-    let offset = if cursor >= inner_height {
-        cursor + 1 - inner_height
+    let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
+    let list_area = if has_search {
+        Rect { height: area.height.saturating_sub(3), ..area }
     } else {
-        0
+        area
     };
-    let visible: Vec<ListItem> = items
-        .iter()
+    let inner_height = list_area.height.saturating_sub(2) as usize;
+
+    let q = state.overlay_search.to_lowercase();
+    let filtered: Vec<(usize, &String)> = items.iter().enumerate()
+        .filter(|(_, s)| q.is_empty() || s.to_lowercase().contains(&q))
+        .collect();
+
+    // Clamp scroll: peripheral — only move when cursor leaves window
+    if cursor < state.overlay_scroll {
+        state.overlay_scroll = cursor;
+    } else if inner_height > 0 && cursor >= state.overlay_scroll + inner_height {
+        state.overlay_scroll = cursor + 1 - inner_height;
+    }
+
+    let visible: Vec<ListItem> = filtered.iter()
         .enumerate()
-        .skip(offset)
+        .skip(state.overlay_scroll)
         .take(inner_height)
-        .map(|(i, s)| {
+        .map(|(fi, (_, s))| {
             let item = ListItem::new(format!("  {}", s));
-            if i == cursor {
+            if fi == cursor {
                 item.style(Style::default().bg(Color::Blue).fg(Color::White))
             } else {
                 item
             }
         })
         .collect();
-    let list = List::new(visible).block(block);
-    f.render_widget(list, area);
+
+    let match_info = if !q.is_empty() { format!("  ({} matches)", filtered.len()) } else { String::new() };
+    let block = block.title_bottom(Line::from(Span::styled(
+        format!("  {}/{}{} ", cursor + 1, filtered.len(), match_info),
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(List::new(visible).block(block), list_area);
+
+    if has_search {
+        let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
+        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+    }
 }
 
 /// Compute a centered rect that is `percent_x`% wide and `percent_y`% tall.
+fn render_search_bar(f: &mut Frame, area: Rect, query: &str, active: bool) {
+    let (border_color, title) = if active {
+        (Color::Yellow, " Search (Esc to stop typing, keep filter) ")
+    } else {
+        (Color::DarkGray, " Filter active (/ to edit, Esc to clear) ")
+    };
+    let text = Line::from(vec![
+        Span::styled("/ ", Style::default().fg(Color::Yellow)),
+        Span::styled(query, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        if active { Span::styled("▌", Style::default().fg(Color::Yellow)) } else { Span::raw("") },
+    ]);
+    f.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color)),
+        ),
+        area,
+    );
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
