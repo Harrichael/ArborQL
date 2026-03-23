@@ -109,7 +109,7 @@ impl Engine {
         Ok(total)
     }
 
-    /// Recursively attach path steps to a node.
+    /// Attach path steps to a root node, recursively traversing all steps.
     async fn attach_path(
         &mut self,
         db: &dyn Database,
@@ -117,57 +117,7 @@ impl Engine {
         path: &TablePath,
         step_idx: usize,
     ) -> Result<usize> {
-        if step_idx >= path.steps.len() {
-            return Ok(0);
-        }
-        let step = &path.steps[step_idx];
-        // Get the FK value from this node
-        let fk_val = match self.roots[node_idx].row.get(&step.from_column) {
-            Some(v) => v.to_string(),
-            None => return Ok(0),
-        };
-        // Fetch matching rows from the next table
-        let sql = format!(
-            "SELECT * FROM {} WHERE {} = '{}'",
-            step.to_table,
-            step.to_column,
-            fk_val.replace('\'', "''")
-        );
-        let rows = db.query(&sql).await?;
-        let count = rows.len();
-        for row in rows {
-            let child = DataNode::new(step.to_table.clone(), row);
-            self.roots[node_idx].children.push(child);
-        }
-        // Recurse into newly added children for the next step
-        if step_idx + 1 < path.steps.len() {
-            let child_count = self.roots[node_idx].children.len();
-            let start = child_count.saturating_sub(count);
-            // We need to handle nested children differently since they're embedded
-            // For simplicity, process children of the current node
-            for ci in start..child_count {
-                let next_fk_val = match self.roots[node_idx].children[ci]
-                    .row
-                    .get(&path.steps[step_idx + 1].from_column)
-                {
-                    Some(v) => v.to_string(),
-                    None => continue,
-                };
-                let next_step = &path.steps[step_idx + 1];
-                let next_sql = format!(
-                    "SELECT * FROM {} WHERE {} = '{}'",
-                    next_step.to_table,
-                    next_step.to_column,
-                    next_fk_val.replace('\'', "''")
-                );
-                let next_rows = db.query(&next_sql).await?;
-                for row in next_rows {
-                    let grandchild = DataNode::new(next_step.to_table.clone(), row);
-                    self.roots[node_idx].children[ci].children.push(grandchild);
-                }
-            }
-        }
-        Ok(count)
+        attach_path_to_node(db, &mut self.roots[node_idx], path, step_idx).await
     }
 
     /// Execute a rule (dispatching to filter or relation).
@@ -235,6 +185,44 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// Recursively attach path steps starting at `step_idx` to `node`, fetching
+/// children from the database and recursing into each child for the next step.
+/// Uses `Box::pin` to allow the async function to call itself recursively.
+fn attach_path_to_node<'a>(
+    db: &'a dyn Database,
+    node: &'a mut DataNode,
+    path: &'a TablePath,
+    step_idx: usize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + 'a>> {
+    Box::pin(async move {
+        if step_idx >= path.steps.len() {
+            return Ok(0);
+        }
+        let step = &path.steps[step_idx];
+        // Get the FK value from this node
+        let fk_val = match node.row.get(&step.from_column) {
+            Some(v) => v.to_string(),
+            None => return Ok(0),
+        };
+        // Fetch matching rows from the next table
+        let sql = format!(
+            "SELECT * FROM {} WHERE {} = '{}'",
+            step.to_table,
+            step.to_column,
+            fk_val.replace('\'', "''")
+        );
+        let rows = db.query(&sql).await?;
+        let count = rows.len();
+        for row in rows {
+            let mut child = DataNode::new(step.to_table.clone(), row);
+            // Recursively attach subsequent path steps to this child
+            attach_path_to_node(db, &mut child, path, step_idx + 1).await?;
+            node.children.push(child);
+        }
+        Ok(count)
+    })
 }
 
 /// Build a `TablePath` from an explicit `via` list.
@@ -331,6 +319,7 @@ pub fn available_extra_columns(node: &DataNode) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::db::Value;
+    use crate::schema::PathStep;
 
     use std::collections::HashMap;
 
@@ -378,5 +367,94 @@ mod tests {
         let node = DataNode::new("users".to_string(), row);
         // "id" comes before "name" in candidates
         assert!(node.summary().contains("id") || node.summary().contains("name"));
+    }
+
+    /// Create an in-memory SQLite database with a 3-table schema mirroring the
+    /// users → orders → order_items → products chain.
+    async fn setup_test_db() -> crate::db::sqlite::SqliteDb {
+        use sqlx::SqlitePool;
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let stmts = [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id))",
+            "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE order_items (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), product_id INTEGER NOT NULL REFERENCES products(id))",
+            "INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')",
+            "INSERT INTO orders VALUES (10, 1), (11, 2)",
+            "INSERT INTO products VALUES (100, 'Widget'), (101, 'Gadget')",
+            "INSERT INTO order_items VALUES (1000, 10, 100), (1001, 11, 101)",
+        ];
+        for stmt in &stmts {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        crate::db::sqlite::SqliteDb::from_pool(pool)
+    }
+
+    #[tokio::test]
+    async fn test_apply_relation_rule_single_step() {
+        // users → orders (reverse edge: orders.user_id → users.id)
+        let db = setup_test_db().await;
+        let path = TablePath {
+            steps: vec![PathStep {
+                from_table: "users".to_string(),
+                from_column: "id".to_string(),
+                to_table: "orders".to_string(),
+                to_column: "user_id".to_string(),
+            }],
+        };
+        let schema = crate::schema::Schema::default();
+        let mut engine = Engine::new(schema);
+        engine.roots.push(create_test_node("users", 1));
+        engine.roots.push(create_test_node("users", 2));
+
+        let count = engine.apply_relation_rule(&db, &path).await.unwrap();
+        assert_eq!(count, 2); // one order per user
+        assert_eq!(engine.roots[0].children.len(), 1);
+        assert_eq!(engine.roots[1].children.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_apply_relation_rule_three_steps() {
+        // users → orders → order_items → products (3 steps)
+        let db = setup_test_db().await;
+        let path = TablePath {
+            steps: vec![
+                PathStep {
+                    from_table: "users".to_string(),
+                    from_column: "id".to_string(),
+                    to_table: "orders".to_string(),
+                    to_column: "user_id".to_string(),
+                },
+                PathStep {
+                    from_table: "orders".to_string(),
+                    from_column: "id".to_string(),
+                    to_table: "order_items".to_string(),
+                    to_column: "order_id".to_string(),
+                },
+                PathStep {
+                    from_table: "order_items".to_string(),
+                    from_column: "product_id".to_string(),
+                    to_table: "products".to_string(),
+                    to_column: "id".to_string(),
+                },
+            ],
+        };
+        let schema = crate::schema::Schema::default();
+        let mut engine = Engine::new(schema);
+        engine.roots.push(create_test_node("users", 1));
+
+        engine.apply_relation_rule(&db, &path).await.unwrap();
+
+        // Alice has 1 order, that order has 1 order_item, that item links to 1 product
+        assert_eq!(engine.roots[0].children.len(), 1, "user should have 1 order");
+        let order = &engine.roots[0].children[0];
+        assert_eq!(order.table, "orders");
+        assert_eq!(order.children.len(), 1, "order should have 1 order_item");
+        let item = &order.children[0];
+        assert_eq!(item.table, "order_items");
+        assert_eq!(item.children.len(), 1, "order_item should have 1 product");
+        let product = &item.children[0];
+        assert_eq!(product.table, "products");
+        assert_eq!(product.children.len(), 0);
     }
 }
