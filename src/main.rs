@@ -15,7 +15,8 @@ use engine::{Engine, flatten_tree};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use schema::Schema;
 use std::io;
-use ui::app::{AppState, ColumnManagerItem, Mode};
+use ui::app::{AppState, ColumnManagerItem, Mode, VirtualFkAddStep};
+use schema::VirtualFkDef;
 
 /// ArborQL — Navigate complex datasets from multiple sources intuitively.
 #[derive(Parser, Debug)]
@@ -356,6 +357,9 @@ async fn handle_key(
                         }
                     }
                 }
+                KeyCode::Char('v') => {
+                    state.mode = Mode::VirtualFkManager { cursor: 0 };
+                }
                 _ => {}
             }
         }
@@ -411,16 +415,21 @@ async fn handle_key(
                         let chosen = &paths[state.path_cursor];
                         // Apply the chosen path
                         engine.apply_relation_rule(db, chosen).await?;
-                        // Update rule with the via path
+                        // Update rule with the chosen path stored as resolved_path
                         let updated_rule = match rule {
-                            rules::Rule::Relation { from_table, to_table, .. } => {
-                                let via: Vec<String> = chosen
+                            rules::Rule::Relation { from_table, to_table, via, .. } => {
+                                let extra_via: Vec<String> = chosen
                                     .steps
                                     .iter()
                                     .skip(1)
                                     .map(|s| s.from_table.clone())
                                     .collect();
-                                rules::Rule::Relation { from_table, to_table, via }
+                                rules::Rule::Relation {
+                                    from_table,
+                                    to_table,
+                                    via: if via.is_empty() { extra_via } else { via },
+                                    resolved_path: Some(chosen.clone()),
+                                }
                             }
                             other => other,
                         };
@@ -544,9 +553,195 @@ async fn handle_key(
         Mode::Error(_) | Mode::Info(_) => {
             state.mode = Mode::Normal;
         }
+
+        // ── Virtual FK manager ───────────────────────────────────────────
+        Mode::VirtualFkManager { cursor } => {
+            match key.code {
+                KeyCode::Esc => { state.mode = Mode::Normal; }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if cursor > 0 {
+                        state.mode = Mode::VirtualFkManager { cursor: cursor - 1 };
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if cursor + 1 < state.virtual_fks.len() {
+                        state.mode = Mode::VirtualFkManager { cursor: cursor + 1 };
+                    }
+                }
+                KeyCode::Char('a') => {
+                    state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickFromTable { cursor: 0 });
+                }
+                KeyCode::Char('d') | KeyCode::Char('x') => {
+                    if cursor < state.virtual_fks.len() {
+                        let removed = state.virtual_fks.remove(cursor);
+                        engine.schema.virtual_fks.retain(|v| v != &removed);
+                        let new_cursor = if cursor > 0 && cursor >= state.virtual_fks.len() {
+                            cursor - 1
+                        } else {
+                            cursor
+                        };
+                        state.mode = Mode::VirtualFkManager { cursor: new_cursor };
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Virtual FK creation wizard ───────────────────────────────────
+        Mode::VirtualFkAdd(ref step) => {
+            let step = step.clone();
+            match step {
+                VirtualFkAddStep::PickFromTable { cursor } => match key.code {
+                    KeyCode::Esc => { state.mode = Mode::VirtualFkManager { cursor: 0 }; }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if cursor > 0 { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickFromTable { cursor: cursor - 1 }); }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if cursor + 1 < state.table_names.len() { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickFromTable { cursor: cursor + 1 }); }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(t) = state.table_names.get(cursor) {
+                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeColumn { from_table: t.clone(), cursor: 0 });
+                        }
+                    }
+                    _ => {}
+                },
+                VirtualFkAddStep::PickTypeColumn { ref from_table, cursor } => {
+                    let cols = state.table_columns.get(from_table).cloned().unwrap_or_default();
+                    match key.code {
+                        KeyCode::Esc => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickFromTable { cursor: 0 }); }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if cursor > 0 { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeColumn { from_table: from_table.clone(), cursor: cursor - 1 }); }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if cursor + 1 < cols.len() { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeColumn { from_table: from_table.clone(), cursor: cursor + 1 }); }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(col) = cols.get(cursor) {
+                                let options = query_type_options(db, from_table, col).await;
+                                state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeValue {
+                                    from_table: from_table.clone(),
+                                    type_column: col.clone(),
+                                    options,
+                                    cursor: 0,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+                VirtualFkAddStep::PickTypeValue { ref from_table, ref type_column, ref options, cursor } => match key.code {
+                    KeyCode::Esc => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeColumn { from_table: from_table.clone(), cursor: 0 }); }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if cursor > 0 { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeValue { from_table: from_table.clone(), type_column: type_column.clone(), options: options.clone(), cursor: cursor - 1 }); }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if cursor + 1 < options.len() { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeValue { from_table: from_table.clone(), type_column: type_column.clone(), options: options.clone(), cursor: cursor + 1 }); }
+                    }
+                    KeyCode::Enter => {
+                        if let Some((type_value, _)) = options.get(cursor) {
+                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickIdColumn { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), cursor: 0 });
+                        }
+                    }
+                    _ => {}
+                },
+                VirtualFkAddStep::PickIdColumn { ref from_table, ref type_column, ref type_value, cursor } => {
+                    let cols = state.table_columns.get(from_table).cloned().unwrap_or_default();
+                    match key.code {
+                        KeyCode::Esc => {
+                            // Re-query options to return to step 3.
+                            let options = query_type_options(db, from_table, type_column).await;
+                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeValue { from_table: from_table.clone(), type_column: type_column.clone(), options, cursor: 0 });
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if cursor > 0 { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickIdColumn { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), cursor: cursor - 1 }); }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if cursor + 1 < cols.len() { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickIdColumn { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), cursor: cursor + 1 }); }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(col) = cols.get(cursor) {
+                                state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToTable { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), id_column: col.clone(), cursor: 0 });
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+                VirtualFkAddStep::PickToTable { ref from_table, ref type_column, ref type_value, ref id_column, cursor } => match key.code {
+                    KeyCode::Esc => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickIdColumn { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), cursor: 0 }); }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if cursor > 0 { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToTable { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), id_column: id_column.clone(), cursor: cursor - 1 }); }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if cursor + 1 < state.table_names.len() { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToTable { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), id_column: id_column.clone(), cursor: cursor + 1 }); }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(to_table) = state.table_names.get(cursor) {
+                            // Default cursor to the "id" column if present.
+                            let to_cols = state.table_columns.get(to_table).cloned().unwrap_or_default();
+                            let default = to_cols.iter().position(|c| c == "id").unwrap_or(0);
+                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToColumn {
+                                from_table: from_table.clone(),
+                                type_column: type_column.clone(),
+                                type_value: type_value.clone(),
+                                id_column: id_column.clone(),
+                                to_table: to_table.clone(),
+                                cursor: default,
+                            });
+                        }
+                    }
+                    _ => {}
+                },
+                VirtualFkAddStep::PickToColumn { ref from_table, ref type_column, ref type_value, ref id_column, ref to_table, cursor } => {
+                    let to_cols = state.table_columns.get(to_table).cloned().unwrap_or_default();
+                    match key.code {
+                        KeyCode::Esc => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToTable { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), id_column: id_column.clone(), cursor: 0 }); }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if cursor > 0 { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToColumn { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), id_column: id_column.clone(), to_table: to_table.clone(), cursor: cursor - 1 }); }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if cursor + 1 < to_cols.len() { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToColumn { from_table: from_table.clone(), type_column: type_column.clone(), type_value: type_value.clone(), id_column: id_column.clone(), to_table: to_table.clone(), cursor: cursor + 1 }); }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(to_col) = to_cols.get(cursor) {
+                                let vfk = VirtualFkDef {
+                                    from_table: from_table.clone(),
+                                    type_column: type_column.clone(),
+                                    type_value: type_value.clone(),
+                                    id_column: id_column.clone(),
+                                    to_table: to_table.clone(),
+                                    to_column: to_col.clone(),
+                                };
+                                state.virtual_fks.push(vfk.clone());
+                                engine.schema.virtual_fks.push(vfk);
+                                state.mode = Mode::VirtualFkManager { cursor: state.virtual_fks.len().saturating_sub(1) };
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+            }
+        }
     }
 
     Ok(true)
+}
+
+/// Query distinct values of `type_col` in `table`, ordered by frequency descending.
+/// Returns a list of (value, count) pairs.
+async fn query_type_options(db: &dyn db::Database, table: &str, type_col: &str) -> Vec<(String, i64)> {
+    let sql = format!(
+        "SELECT {} as type_val, COUNT(*) as cnt FROM {} GROUP BY {} ORDER BY cnt DESC",
+        type_col, table, type_col
+    );
+    db.query(&sql).await.unwrap_or_default().iter().filter_map(|row| {
+        let val = row.get("type_val")?.to_string();
+        let cnt = match row.get("cnt")? {
+            db::Value::Integer(n) => *n,
+            _ => 0,
+        };
+        Some((val, cnt))
+    }).collect()
 }
 
 /// Execute a command string entered in command mode.

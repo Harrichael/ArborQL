@@ -1,6 +1,6 @@
 use crate::engine::{flatten_tree, DataNode};
 use crate::rules::{completions_at, Completion};
-use crate::ui::app::{AppState, Mode};
+use crate::ui::app::{AppState, Mode, VirtualFkAddStep};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -50,6 +50,8 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     match &state.mode {
         Mode::PathSelection => render_path_selection(f, state),
         Mode::RuleReorder => render_rule_reorder(f, state),
+        Mode::VirtualFkManager { .. } => render_virtual_fk_manager(f, state),
+        Mode::VirtualFkAdd(_) => render_virtual_fk_add(f, state),
         Mode::Error(msg) => {
             let msg = msg.clone();
             render_overlay_message(f, &format!("Error: {}", msg), Color::Red);
@@ -254,7 +256,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         let (title, display) = match &state.mode {
             Mode::Normal => (
                 " ArborQL ",
-                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' add column  'r' reorder  'q' quit",
+                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  'q' quit",
             ),
             _ => (" ArborQL ", ""),
         };
@@ -399,6 +401,154 @@ fn render_overlay_message(f: &mut Frame, message: &str, color: Color) {
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
     f.render_widget(para, area);
+}
+
+fn render_virtual_fk_manager(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(72, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let cursor = if let Mode::VirtualFkManager { cursor } = state.mode { cursor } else { 0 };
+
+    let items: Vec<ListItem> = if state.virtual_fks.is_empty() {
+        vec![ListItem::new("  (none — press 'a' to add one)")
+            .style(Style::default().fg(Color::DarkGray))]
+    } else {
+        state
+            .virtual_fks
+            .iter()
+            .enumerate()
+            .map(|(i, vfk)| {
+                let text = format!(
+                    "  {}.{} = '{}' → {}.{}  (via {}.{})",
+                    vfk.from_table, vfk.type_column, vfk.type_value,
+                    vfk.to_table, vfk.to_column,
+                    vfk.from_table, vfk.id_column,
+                );
+                let item = ListItem::new(text);
+                if i == cursor {
+                    item.style(Style::default().bg(Color::Blue).fg(Color::White))
+                } else {
+                    item
+                }
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(" Virtual FK Manager  (↑↓ navigate · a add · d/x delete · Esc close) ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(list, area);
+}
+
+fn render_virtual_fk_add(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(60, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let step = if let Mode::VirtualFkAdd(ref s) = state.mode { s } else { return };
+
+    match step {
+        VirtualFkAddStep::PickFromTable { cursor } => {
+            let items = pick_list_items(&state.table_names, *cursor);
+            let list = List::new(items).block(
+                Block::default()
+                    .title(" Step 1/5: Table that owns the type+id columns  (↑↓ · Enter · Esc) ")
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, area);
+        }
+        VirtualFkAddStep::PickTypeColumn { from_table, cursor } => {
+            let cols = state.table_columns.get(from_table).cloned().unwrap_or_default();
+            let items = pick_list_items(&cols, *cursor);
+            let list = List::new(items).block(
+                Block::default()
+                    .title(format!(
+                        " Step 2/5: Type discriminator column in '{}'  (↑↓ · Enter · Esc) ",
+                        from_table
+                    ))
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, area);
+        }
+        VirtualFkAddStep::PickTypeValue { from_table, type_column, options, cursor } => {
+            let option_strings: Vec<String> = options
+                .iter()
+                .map(|(val, cnt)| format!("{}  ({})", val, cnt))
+                .collect();
+            let items = pick_list_items(&option_strings, *cursor);
+            let list = List::new(items).block(
+                Block::default()
+                    .title(format!(
+                        " Step 3/5: Select value of {}.{}  (↑↓ · Enter · Esc) ",
+                        from_table, type_column
+                    ))
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, area);
+        }
+        VirtualFkAddStep::PickIdColumn { from_table, type_column, type_value, cursor } => {
+            let cols = state.table_columns.get(from_table).cloned().unwrap_or_default();
+            let items = pick_list_items(&cols, *cursor);
+            let list = List::new(items).block(
+                Block::default()
+                    .title(format!(
+                        " Step 4/5: ID column in '{}' (holds FK when {}='{}')  (↑↓ · Enter · Esc) ",
+                        from_table, type_column, type_value
+                    ))
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, area);
+        }
+        VirtualFkAddStep::PickToTable { type_column, type_value, id_column, cursor, .. } => {
+            let items = pick_list_items(&state.table_names, *cursor);
+            let list = List::new(items).block(
+                Block::default()
+                    .title(format!(
+                        " Step 5/6: Target table for {}='{}' via {}  (↑↓ · Enter · Esc) ",
+                        type_column, type_value, id_column
+                    ))
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, area);
+        }
+        VirtualFkAddStep::PickToColumn { type_column, type_value, to_table, cursor, .. } => {
+            let to_cols = state.table_columns.get(to_table).cloned().unwrap_or_default();
+            let items = pick_list_items(&to_cols, *cursor);
+            let list = List::new(items).block(
+                Block::default()
+                    .title(format!(
+                        " Step 6/6: Join column on '{}' for {}='{}'  (↑↓ · Enter · Esc) ",
+                        to_table, type_column, type_value
+                    ))
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, area);
+        }
+    }
+}
+
+/// Build a list of selectable items, highlighting the one at `cursor`.
+fn pick_list_items(items: &[String], cursor: usize) -> Vec<ListItem> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let item = ListItem::new(format!("  {}", s));
+            if i == cursor {
+                item.style(Style::default().bg(Color::Blue).fg(Color::White))
+            } else {
+                item
+            }
+        })
+        .collect()
 }
 
 /// Compute a centered rect that is `percent_x`% wide and `percent_y`% tall.

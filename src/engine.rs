@@ -123,7 +123,16 @@ impl Engine {
                 from_table,
                 to_table,
                 via,
+                resolved_path,
             } => {
+                // If a path was previously resolved (auto or manual), use it
+                // directly so future virtual FKs can't create ambiguity.
+                if let Some(path) = resolved_path {
+                    let path = path.clone();
+                    self.apply_relation_rule(db, &path).await?;
+                    self.rules.push(rule);
+                    return Ok(None);
+                }
                 if !via.is_empty() {
                     // User already specified the path
                     let path = build_path_from_via(
@@ -148,8 +157,16 @@ impl Engine {
                         to_table
                     );
                 } else if paths.len() == 1 {
-                    self.apply_relation_rule(db, &paths[0]).await?;
-                    self.rules.push(rule);
+                    let path = paths.into_iter().next().unwrap();
+                    self.apply_relation_rule(db, &path).await?;
+                    // Store the resolved path so re-execution is deterministic.
+                    let stored = Rule::Relation {
+                        from_table: from_table.clone(),
+                        to_table: to_table.clone(),
+                        via: via.clone(),
+                        resolved_path: Some(path),
+                    };
+                    self.rules.push(stored);
                     Ok(None)
                 } else {
                     // Multiple paths — let the UI ask the user to pick
@@ -187,23 +204,43 @@ fn attach_path_to_node<'a>(
             return Ok(0);
         }
         let step = &path.steps[step_idx];
+
+        // Polymorphic forward filter: skip if type column doesn't match expected value
+        if let Some((type_col, expected)) = &step.source_type_filter {
+            let actual = node.row.get(type_col).map(|v| v.to_string()).unwrap_or_default();
+            if actual != *expected {
+                return Ok(0);
+            }
+        }
+
         // Get the FK value from this node
         let fk_val = match node.row.get(&step.from_column) {
             Some(v) => v.to_string(),
             None => return Ok(0),
         };
-        // Fetch matching rows from the next table
-        let sql = format!(
-            "SELECT * FROM {} WHERE {} = '{}'",
-            step.to_table,
-            step.to_column,
-            fk_val.replace('\'', "''")
-        );
+
+        // Build SQL, optionally with extra WHERE clause for reverse poly steps
+        let sql = if let Some(extra) = &step.target_extra_where {
+            format!(
+                "SELECT * FROM {} WHERE {} = '{}' AND {}",
+                step.to_table,
+                step.to_column,
+                fk_val.replace('\'', "''"),
+                extra
+            )
+        } else {
+            format!(
+                "SELECT * FROM {} WHERE {} = '{}'",
+                step.to_table,
+                step.to_column,
+                fk_val.replace('\'', "''")
+            )
+        };
+
         let rows = db.query(&sql).await?;
         let count = rows.len();
         for row in rows {
             let mut child = DataNode::new(step.to_table.clone(), row);
-            // Recursively attach subsequent path steps to this child
             attach_path_to_node(db, &mut child, path, step_idx + 1).await?;
             node.children.push(child);
         }
@@ -271,6 +308,7 @@ fn find_step(schema: &Schema, a: &str, b: &str) -> Option<crate::schema::PathSte
                     from_column: fk.from_column.clone(),
                     to_table: b.to_string(),
                     to_column: fk.to_column.clone(),
+                    ..Default::default()
                 });
             }
         }
@@ -284,8 +322,36 @@ fn find_step(schema: &Schema, a: &str, b: &str) -> Option<crate::schema::PathSte
                     from_column: fk.to_column.clone(),
                     to_table: b.to_string(),
                     to_column: fk.from_column.clone(),
+                    ..Default::default()
                 });
             }
+        }
+    }
+    // Forward virtual FK: a owns the poly columns, b is the target
+    for vfk in &schema.virtual_fks {
+        if vfk.from_table == a && vfk.to_table == b {
+            return Some(PathStep {
+                from_table: a.to_string(),
+                from_column: vfk.id_column.clone(),
+                to_table: b.to_string(),
+                to_column: vfk.to_column.clone(),
+                source_type_filter: Some((vfk.type_column.clone(), vfk.type_value.clone())),
+                ..Default::default()
+            });
+        }
+    }
+    // Reverse virtual FK: b owns the poly columns, a is the target
+    for vfk in &schema.virtual_fks {
+        if vfk.to_table == a && vfk.from_table == b {
+            let extra = format!("{} = '{}'", vfk.type_column, vfk.type_value.replace('\'', "''"));
+            return Some(PathStep {
+                from_table: a.to_string(),
+                from_column: vfk.to_column.clone(),
+                to_table: b.to_string(),
+                to_column: vfk.id_column.clone(),
+                target_extra_where: Some(extra),
+                ..Default::default()
+            });
         }
     }
     None
@@ -428,6 +494,7 @@ mod tests {
                 from_column: "id".to_string(),
                 to_table: "orders".to_string(),
                 to_column: "user_id".to_string(),
+                ..Default::default()
             }],
         };
         let schema = crate::schema::Schema::default();
@@ -452,18 +519,21 @@ mod tests {
                     from_column: "id".to_string(),
                     to_table: "orders".to_string(),
                     to_column: "user_id".to_string(),
+                    ..Default::default()
                 },
                 PathStep {
                     from_table: "orders".to_string(),
                     from_column: "id".to_string(),
                     to_table: "order_items".to_string(),
                     to_column: "order_id".to_string(),
+                    ..Default::default()
                 },
                 PathStep {
                     from_table: "order_items".to_string(),
                     from_column: "product_id".to_string(),
                     to_table: "products".to_string(),
                     to_column: "id".to_string(),
+                    ..Default::default()
                 },
             ],
         };
@@ -525,6 +595,7 @@ mod tests {
                 from_column: "id".to_string(),
                 to_table: "orders".to_string(),
                 to_column: "user_id".to_string(),
+                ..Default::default()
             }],
         };
         engine.apply_relation_rule(&db, &users_to_orders).await.unwrap();
@@ -537,6 +608,7 @@ mod tests {
                 from_column: "id".to_string(),
                 to_table: "order_items".to_string(),
                 to_column: "order_id".to_string(),
+                ..Default::default()
             }],
         };
         engine.apply_relation_rule(&db, &orders_to_items).await.unwrap();

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::schema::TablePath;
 
 /// A candidate for the next token at the current cursor position, used to drive
 /// real-time hints as the user types a command.
@@ -289,8 +290,12 @@ pub enum Rule {
     Relation {
         from_table: String,
         to_table: String,
-        /// Explicit via-path, if already selected by the user.
+        /// Explicit via-path supplied by the user (intermediate table names).
         via: Vec<String>,
+        /// The resolved path chosen at execution time (auto or manual).
+        /// Stored so re-execution uses the exact same path even if new virtual
+        /// FKs later make the route ambiguous.
+        resolved_path: Option<TablePath>,
     },
 }
 
@@ -309,10 +314,21 @@ impl std::fmt::Display for Rule {
                 from_table,
                 to_table,
                 via,
+                resolved_path,
             } => {
                 write!(f, "{} to {}", from_table, to_table)?;
                 if !via.is_empty() {
                     write!(f, " via {}", via.join(", "))?;
+                } else if let Some(path) = resolved_path {
+                    let intermediates: Vec<String> = path
+                        .steps
+                        .iter()
+                        .skip(1)
+                        .map(|s| s.from_table.clone())
+                        .collect();
+                    if !intermediates.is_empty() {
+                        write!(f, " via {}", intermediates.join(", "))?;
+                    }
                 }
                 Ok(())
             }
@@ -354,6 +370,7 @@ pub fn parse_rule(input: &str) -> Result<Rule, String> {
             from_table,
             to_table,
             via,
+            resolved_path: None,
         });
     }
 
@@ -541,6 +558,7 @@ mod tests {
                 from_table: "user".to_string(),
                 to_table: "location".to_string(),
                 via: vec![],
+                resolved_path: None,
             }
         );
     }
@@ -554,6 +572,7 @@ mod tests {
                 from_table: "user".to_string(),
                 to_table: "location".to_string(),
                 via: vec!["location_assignments".to_string()],
+                resolved_path: None,
             }
         );
     }
@@ -575,6 +594,7 @@ mod tests {
             from_table: "user".to_string(),
             to_table: "location".to_string(),
             via: vec!["location_assignments".to_string()],
+            resolved_path: None,
         };
         assert_eq!(r.to_string(), "user to location via location_assignments");
     }

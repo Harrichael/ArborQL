@@ -35,10 +35,11 @@ cargo build --release
 
 ---
 
-## Quick start with the sample database
+## Quick start with the sample databases
 
-A ready-made SQLite3 database lives in `sample/`.  
-It models a small e-commerce/team directory with the following schema:
+Two ready-made SQLite3 databases live in `samples/`.
+
+**`ecommerce`** — a small e-commerce / team directory:
 
 ```
 locations ◄─── departments ◄─── users ───► locations
@@ -48,19 +49,22 @@ locations ◄─── departments ◄─── users ───► locations
                                                              product_tags ◄── tags
 ```
 
-**Create the database from the SQL file (first time only):**
+**`blog`** — a social blogging platform with polymorphic associations:
 
-```bash
-sqlite3 sample/sample.db < sample/schema.sql
+```
+users ───► posts ◄─── comments (polymorphic: Post / Photo)
+      ───► photos ◄── likes    (polymorphic: Post / Photo / Comment)
+                 ◄─── taggings (polymorphic: Post / Photo) ───► tags
 ```
 
 **Start ArborQL:**
 
 ```bash
-./target/release/arborql --database sqlite://sample/sample.db
+./target/release/arborql --database sqlite://samples/ecommerce.db
+./target/release/arborql --database sqlite://samples/blog.db
 ```
 
-### Example session
+### Example session (ecommerce)
 
 Once the TUI is running, press `:` to enter a command:
 
@@ -174,9 +178,11 @@ src/
     ├── app.rs     — Application state & input helpers
     └── render.rs  — ratatui layout & widgets
 
-sample/
-├── schema.sql     — DDL + sample data (re-runnable)
-└── sample.db      — Pre-built SQLite3 database
+samples/
+├── ecommerce.db   — Pre-built SQLite3 database (e-commerce / org chart)
+├── ecommerce.sql  — DDL + seed data (re-runnable)
+├── blog.db        — Pre-built SQLite3 database (blog / polymorphic assocs)
+└── blog.sql       — DDL + seed data (re-runnable)
 ```
 
 ---
