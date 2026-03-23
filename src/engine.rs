@@ -1,5 +1,5 @@
 use crate::db::{Database, Row};
-use crate::rules::{Rule, conditions_to_sql};
+use crate::rules::{Rule, conditions_to_sql, row_matches_conditions};
 use crate::schema::{Schema, TablePath};
 use anyhow::Result;
 
@@ -84,7 +84,15 @@ impl Engine {
         Ok(count)
     }
 
-    /// Execute a relation rule along a specific path. For each node anywhere in
+    /// Remove all nodes in the tree where the table matches and all conditions hold.
+    /// Pruning is recursive: if a parent is pruned, its children are removed too.
+    pub fn apply_prune_rule(
+        &mut self,
+        table: &str,
+        conditions: &[crate::rules::Condition],
+    ) {
+        prune_nodes(&mut self.roots, table, conditions);
+    }
     /// the tree that belongs to `from_table`, follow the path and attach child
     /// nodes (fetching any missing intermediate/target rows).
     pub async fn apply_relation_rule(
@@ -173,6 +181,13 @@ impl Engine {
                     Ok(Some(paths))
                 }
             }
+            Rule::Prune { table, conditions } => {
+                let table = table.clone();
+                let conditions = conditions.clone();
+                self.apply_prune_rule(&table, &conditions);
+                self.rules.push(rule);
+                Ok(None)
+            }
         }
     }
 
@@ -188,6 +203,19 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// Remove nodes matching `table` + `conditions` from the list, recursing into
+/// children of non-matching nodes. A matched node is dropped with all its children.
+fn prune_nodes(nodes: &mut Vec<DataNode>, table: &str, conditions: &[crate::rules::Condition]) {
+    nodes.retain_mut(|node| {
+        if node.table == table && row_matches_conditions(&node.row, conditions) {
+            false // drop this node and all its children
+        } else {
+            prune_nodes(&mut node.children, table, conditions);
+            true
+        }
+    });
 }
 
 /// Recursively attach path steps starting at `step_idx` to `node`, fetching

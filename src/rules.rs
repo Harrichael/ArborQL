@@ -42,6 +42,10 @@ enum GrammarState {
     AfterVia { from: String, to: String },
     /// A via table was entered. Next: `,` or end.
     AfterViaTable { from: String, to: String },
+    /// `prune` keyword seen. Next: a table name.
+    AfterPrune,
+    /// `prune <table>` seen. Next: `where`.
+    AfterPruneTable { table: String },
     /// Invalid token encountered — no valid completions.
     Error,
 }
@@ -96,6 +100,9 @@ fn advance(
     let lower = token.to_lowercase();
     match state {
         GrammarState::Initial => {
+            if lower == "prune" {
+                return GrammarState::AfterPrune;
+            }
             if let Some(t) = tables.iter().find(|t| t.to_lowercase() == lower) {
                 GrammarState::AfterTable { table: t.clone() }
             } else {
@@ -155,6 +162,17 @@ fn advance(
             "," => GrammarState::AfterVia { from, to },
             _ => GrammarState::Error,
         },
+        GrammarState::AfterPrune => {
+            if let Some(t) = tables.iter().find(|t| t.to_lowercase() == lower) {
+                GrammarState::AfterPruneTable { table: t.clone() }
+            } else {
+                GrammarState::Error
+            }
+        }
+        GrammarState::AfterPruneTable { table } => match lower.as_str() {
+            "where" => GrammarState::AfterWhere { table },
+            _ => GrammarState::Error,
+        },
         GrammarState::Error => GrammarState::Error,
     }
 }
@@ -166,7 +184,11 @@ fn valid_completions_for_state(
     columns: &HashMap<String, Vec<String>>,
 ) -> Vec<Completion> {
     match state {
-        GrammarState::Initial => tables.iter().map(|t| Completion::Token(t.clone())).collect(),
+        GrammarState::Initial => {
+            let mut completions: Vec<Completion> = tables.iter().map(|t| Completion::Token(t.clone())).collect();
+            completions.push(Completion::Token("prune".to_string()));
+            completions
+        }
         GrammarState::AfterTable { .. } => vec![
             Completion::Token("where".to_string()),
             Completion::Token("to".to_string()),
@@ -191,6 +213,10 @@ fn valid_completions_for_state(
             tables.iter().map(|t| Completion::Token(t.clone())).collect()
         }
         GrammarState::AfterViaTable { .. } => vec![Completion::Token(",".to_string())],
+        GrammarState::AfterPrune => {
+            tables.iter().map(|t| Completion::Token(t.clone())).collect()
+        }
+        GrammarState::AfterPruneTable { .. } => vec![Completion::Token("where".to_string())],
         GrammarState::Error => vec![],
     }
 }
@@ -297,6 +323,11 @@ pub enum Rule {
         /// FKs later make the route ambiguous.
         resolved_path: Option<TablePath>,
     },
+    /// `prune <table> where <col> <op> <val>` — remove matching nodes from the tree.
+    Prune {
+        table: String,
+        conditions: Vec<Condition>,
+    },
 }
 
 impl std::fmt::Display for Rule {
@@ -332,6 +363,10 @@ impl std::fmt::Display for Rule {
                 }
                 Ok(())
             }
+            Rule::Prune { table, conditions } => {
+                let parts: Vec<String> = conditions.iter().map(|c| c.to_string()).collect();
+                write!(f, "prune {} where {}", table, parts.join(" and "))
+            }
         }
     }
 }
@@ -343,9 +378,29 @@ impl std::fmt::Display for Rule {
 ///   operators: `=`, `!=`, `<`, `<=`, `>`, `>=`, `startswith`, `endswith`, `contains`
 /// - `<from> to <to>`
 /// - `<from> to <to> via <t1>[, <t2> ...]`
+/// - `prune <table> where <col> <op> <val> [and ...]`
 pub fn parse_rule(input: &str) -> Result<Rule, String> {
     let input = input.trim();
     let lower = input.to_lowercase();
+
+    // Check for "prune <table> where ..." pattern
+    if lower.starts_with("prune ") {
+        let rest = input[6..].trim();
+        let rest_lower = rest.to_lowercase();
+        if let Some(where_pos) = find_keyword_pos(&rest_lower, " where ") {
+            let table = rest[..where_pos].trim().to_string();
+            let conditions_str = &rest[where_pos + 7..];
+            let conditions = parse_conditions(conditions_str)?;
+            if table.is_empty() {
+                return Err("'prune' rule requires a table name".to_string());
+            }
+            if conditions.is_empty() {
+                return Err("'prune' rule requires at least one condition".to_string());
+            }
+            return Ok(Rule::Prune { table, conditions });
+        }
+        return Err("'prune' rule requires 'where <col> <op> <val>'".to_string());
+    }
 
     // Check for "X to Y [via ...]" pattern
     if let Some(to_pos) = find_keyword_pos(&lower, " to ") {
@@ -503,6 +558,29 @@ pub fn conditions_to_sql(conditions: &[Condition]) -> String {
         })
         .collect();
     parts.join(" AND ")
+}
+
+/// Evaluate a single condition against an in-memory row value string.
+pub fn condition_matches_value(op: &Op, row_val: &str, target: &str) -> bool {
+    match op {
+        Op::Eq => row_val == target,
+        Op::Ne => row_val != target,
+        Op::Lt => row_val < target,
+        Op::Le => row_val <= target,
+        Op::Gt => row_val > target,
+        Op::Ge => row_val >= target,
+        Op::StartsWith => row_val.starts_with(target),
+        Op::EndsWith => row_val.ends_with(target),
+        Op::Contains => row_val.contains(target),
+    }
+}
+
+/// Return true if all conditions match the given row.
+pub fn row_matches_conditions(row: &crate::db::Row, conditions: &[Condition]) -> bool {
+    conditions.iter().all(|c| {
+        let val = row.get(&c.column).map(|v| v.to_string()).unwrap_or_default();
+        condition_matches_value(&c.op, &val, &c.value)
+    })
 }
 
 #[cfg(test)]

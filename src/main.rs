@@ -368,6 +368,36 @@ async fn handle_key(
                 KeyCode::Char('v') => {
                     state.mode = Mode::VirtualFkManager { cursor: 0 };
                 }
+                KeyCode::Char('x') => {
+                    // Prune (remove) the currently selected node from the tree.
+                    let flat = flatten_tree(&engine.roots);
+                    if state.selected_row < flat.len() {
+                        let (_, node) = flat[state.selected_row];
+                        let table = node.table.clone();
+                        // Find primary key column; fall back to "id".
+                        let pk_col = engine
+                            .schema
+                            .tables
+                            .get(&table)
+                            .and_then(|info| {
+                                info.columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone())
+                            })
+                            .unwrap_or_else(|| "id".to_string());
+                        if let Some(pk_val) = node.row.get(&pk_col) {
+                            let rule = rules::Rule::Prune {
+                                table,
+                                conditions: vec![rules::Condition {
+                                    column: pk_col,
+                                    op: rules::Op::Eq,
+                                    value: pk_val.to_string(),
+                                }],
+                            };
+                            if insert_rule_at_next_cursor(state, engine, rule) {
+                                engine.reexecute_all(db).await?;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
