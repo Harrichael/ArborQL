@@ -2,10 +2,32 @@ use crate::db::{Database, TableInfo};
 use anyhow::Result;
 use std::collections::HashMap;
 
+/// A user-defined virtual foreign key for polymorphic (type/id) associations.
+/// Stored in `Schema.virtual_fks` and treated natively alongside real FK edges
+/// during path finding and traversal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VirtualFkDef {
+    /// Table that owns the type+id columns (e.g. `"comments"`).
+    pub from_table: String,
+    /// Discriminator column (e.g. `"commentable_type"`).
+    pub type_column: String,
+    /// Value the type column must hold for this FK (e.g. `"Post"`).
+    pub type_value: String,
+    /// Column in `from_table` that holds the referenced PK (e.g. `"commentable_id"`).
+    pub id_column: String,
+    /// Target table (e.g. `"posts"`).
+    pub to_table: String,
+    /// PK column on the target table (usually `"id"`).
+    pub to_column: String,
+}
+
 /// The full schema of a database, built by querying all tables.
 #[derive(Debug, Default, Clone)]
 pub struct Schema {
     pub tables: HashMap<String, TableInfo>,
+    /// User-defined virtual FKs for polymorphic associations.
+    /// Treated natively alongside real FK edges during path finding.
+    pub virtual_fks: Vec<VirtualFkDef>,
 }
 
 impl Schema {
@@ -17,7 +39,7 @@ impl Schema {
             let info = db.describe_table(&name).await?;
             tables.insert(name, info);
         }
-        Ok(Self { tables })
+        Ok(Self { tables, virtual_fks: Vec::new() })
     }
 
     /// Return a sorted list of table names for display.
@@ -28,8 +50,8 @@ impl Schema {
     }
 }
 
-/// One step in a relationship path (table A → table B via FK).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One step in a relationship path (table A → table B via real or virtual FK).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PathStep {
     /// Source table
     pub from_table: String,
@@ -39,6 +61,11 @@ pub struct PathStep {
     pub to_table: String,
     /// Column in the target table
     pub to_column: String,
+    /// For polymorphic forward steps: only follow this step when the source
+    /// node's named column equals the given value.
+    pub source_type_filter: Option<(String, String)>,
+    /// For polymorphic reverse steps: appended as `AND <str>` to the target query.
+    pub target_extra_where: Option<String>,
 }
 
 impl std::fmt::Display for PathStep {
@@ -47,7 +74,14 @@ impl std::fmt::Display for PathStep {
             f,
             "{}.{} → {}.{}",
             self.from_table, self.from_column, self.to_table, self.to_column
-        )
+        )?;
+        if let Some((col, val)) = &self.source_type_filter {
+            write!(f, " [when {}.{} = '{}']", self.from_table, col, val)?;
+        }
+        if let Some(extra) = &self.target_extra_where {
+            write!(f, " [where {}]", extra)?;
+        }
+        Ok(())
     }
 }
 
@@ -103,6 +137,7 @@ fn dfs(
                     from_column: fk.from_column.clone(),
                     to_table: fk.to_table.clone(),
                     to_column: fk.to_column.clone(),
+                    ..Default::default()
                 };
                 path.push(step);
                 if fk.to_table == target {
@@ -129,6 +164,7 @@ fn dfs(
                     from_column: fk.to_column.clone(),
                     to_table: other_table.clone(),
                     to_column: fk.from_column.clone(),
+                    ..Default::default()
                 };
                 path.push(step);
                 if other_table == target {
@@ -142,9 +178,54 @@ fn dfs(
             }
         }
     }
+    // Forward virtual FK edges
+    for vfk in &schema.virtual_fks {
+        if vfk.from_table == current && !visited.contains(&vfk.to_table) {
+            let step = PathStep {
+                from_table: current.to_string(),
+                from_column: vfk.id_column.clone(),
+                to_table: vfk.to_table.clone(),
+                to_column: vfk.to_column.clone(),
+                source_type_filter: Some((vfk.type_column.clone(), vfk.type_value.clone())),
+                ..Default::default()
+            };
+            path.push(step);
+            if vfk.to_table == target {
+                results.push(TablePath { steps: path.clone() });
+            } else {
+                visited.insert(vfk.to_table.clone());
+                dfs(schema, &vfk.to_table, target, visited, path, results);
+                visited.remove(&vfk.to_table);
+            }
+            path.pop();
+        }
+    }
+
+    // Reverse virtual FK edges
+    for vfk in &schema.virtual_fks {
+        if vfk.to_table == current && !visited.contains(&vfk.from_table) {
+            let extra = format!("{} = '{}'", vfk.type_column, vfk.type_value.replace('\'', "''"));
+            let step = PathStep {
+                from_table: current.to_string(),
+                from_column: vfk.to_column.clone(),
+                to_table: vfk.from_table.clone(),
+                to_column: vfk.id_column.clone(),
+                target_extra_where: Some(extra),
+                ..Default::default()
+            };
+            path.push(step);
+            if vfk.from_table == target {
+                results.push(TablePath { steps: path.clone() });
+            } else {
+                visited.insert(vfk.from_table.clone());
+                dfs(schema, &vfk.from_table, target, visited, path, results);
+                visited.remove(&vfk.from_table);
+            }
+            path.pop();
+        }
+    }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::{ColumnInfo, ForeignKey, TableInfo};
@@ -171,7 +252,7 @@ mod tests {
 
     fn schema_from(tables: Vec<TableInfo>) -> Schema {
         let map = tables.into_iter().map(|t| (t.name.clone(), t)).collect();
-        Schema { tables: map }
+        Schema { tables: map, virtual_fks: Vec::new() }
     }
 
     #[test]

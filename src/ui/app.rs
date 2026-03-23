@@ -1,6 +1,41 @@
 use crate::rules::Rule;
-use crate::schema::TablePath;
+use crate::schema::{TablePath, VirtualFkDef};
 use std::collections::HashMap;
+
+/// State for the 5-step virtual FK creation wizard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VirtualFkAddStep {
+    /// Step 1: choose the table that owns the type+id columns.
+    PickFromTable { cursor: usize },
+    /// Step 2: choose the type discriminator column.
+    PickTypeColumn { from_table: String, cursor: usize },
+    /// Step 3: choose the discriminator value from a live list (value, count).
+    PickTypeValue {
+        from_table: String,
+        type_column: String,
+        options: Vec<(String, i64)>,
+        cursor: usize,
+    },
+    /// Step 4: choose the id column (holds the FK value).
+    PickIdColumn { from_table: String, type_column: String, type_value: String, cursor: usize },
+    /// Step 5: choose the target table (`to_column` defaults to `"id"`).
+    PickToTable {
+        from_table: String,
+        type_column: String,
+        type_value: String,
+        id_column: String,
+        cursor: usize,
+    },
+    /// Step 6: choose the PK/join column on the target table.
+    PickToColumn {
+        from_table: String,
+        type_column: String,
+        type_value: String,
+        id_column: String,
+        to_table: String,
+        cursor: usize,
+    },
+}
 
 /// All possible modes the UI can be in.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +52,10 @@ pub enum Mode {
     Error(String),
     /// Informational message displayed.
     Info(String),
+    /// User is managing virtual (polymorphic) FK definitions.
+    VirtualFkManager { cursor: usize },
+    /// User is stepping through the virtual FK creation wizard.
+    VirtualFkAdd(VirtualFkAddStep),
 }
 
 /// Working item in column manager overlay.
@@ -57,6 +96,8 @@ pub struct AppState {
     pub rule_reorder_redo: Vec<(Vec<Rule>, usize, usize)>,
     /// Whether to show the schema sidebar.
     pub show_schema: bool,
+    /// Column names per table, for command completion hints.
+    pub table_columns: HashMap<String, Vec<String>>,
     /// Tree-level visible columns by table.
     pub tree_visible_columns: HashMap<String, Vec<String>>,
     /// Full tree-level column ordering by table (enabled + disabled).
@@ -67,6 +108,8 @@ pub struct AppState {
     pub default_visible_columns: Vec<String>,
     /// Config-driven table-specific default visible columns.
     pub default_visible_columns_by_table: HashMap<String, Vec<String>>,
+    /// Virtual FK definitions managed by the user.
+    pub virtual_fks: Vec<VirtualFkDef>,
 }
 
 impl AppState {
@@ -87,11 +130,13 @@ impl AppState {
             rule_reorder_undo: Vec::new(),
             rule_reorder_redo: Vec::new(),
             show_schema: false,
+            table_columns: HashMap::new(),
             tree_visible_columns: HashMap::new(),
             tree_column_order: HashMap::new(),
             column_add: None,
             default_visible_columns: vec!["id".to_string(), "name".to_string()],
             default_visible_columns_by_table: HashMap::new(),
+            virtual_fks: Vec::new(),
         }
     }
 

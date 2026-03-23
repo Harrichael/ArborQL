@@ -1,3 +1,239 @@
+use std::collections::HashMap;
+use crate::schema::TablePath;
+
+/// A candidate for the next token at the current cursor position, used to drive
+/// real-time hints as the user types a command.
+///
+/// Adding a new command type only requires extending [`GrammarState`], [`advance`],
+/// and [`valid_completions_for_state`] — `completions_at` needs no changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Completion {
+    /// A specific completable token (keyword, table name, column name, or operator).
+    Token(String),
+    /// The next expected input is a free-form quoted value, e.g. `'Rick'`.
+    QuotedValue,
+}
+
+// ---------------------------------------------------------------------------
+// Grammar state machine (private)
+// ---------------------------------------------------------------------------
+
+/// One position in the command grammar, produced by advancing through complete
+/// tokens left-to-right. Each variant knows what can legally come next.
+#[derive(Clone)]
+enum GrammarState {
+    /// No tokens yet — expect a table name.
+    Initial,
+    /// A valid table name was entered. Next: `where`, `to`, or end.
+    AfterTable { table: String },
+    /// `where` (or `and` after a condition) seen. Next: a column name.
+    AfterWhere { table: String },
+    /// Column name entered. Next: an operator.
+    AfterColumn { table: String },
+    /// Operator entered. Next: a quoted (or bare) value.
+    AfterOp { table: String },
+    /// A complete `col op val` condition was parsed. Next: `and` or end.
+    AfterValue { table: String },
+    /// `to` keyword seen. Next: the destination table name.
+    AfterTo { from: String },
+    /// `<from> to <to>` parsed. Next: `via` or end.
+    AfterToTable { from: String, to: String },
+    /// `via` (or `,` after a via table) seen. Next: a table name.
+    AfterVia { from: String, to: String },
+    /// A via table was entered. Next: `,` or end.
+    AfterViaTable { from: String, to: String },
+    /// Invalid token encountered — no valid completions.
+    Error,
+}
+
+/// Tokenize `input` into complete tokens and a trailing partial token.
+///
+/// Quoted strings (single or double quotes) are kept together as one token.
+/// Commas are emitted as their own `","` token.
+/// Returns `(complete_tokens, partial_last_token)`.
+fn tokenize_partial(input: &str) -> (Vec<String>, String) {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut quote_char = ' ';
+
+    for ch in input.chars() {
+        if in_quote {
+            current.push(ch);
+            if ch == quote_char {
+                in_quote = false;
+            }
+        } else if ch == '\'' || ch == '"' {
+            in_quote = true;
+            quote_char = ch;
+            current.push(ch);
+        } else if ch == ' ' {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+        } else if ch == ',' {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+            tokens.push(",".to_string());
+        } else {
+            current.push(ch);
+        }
+    }
+
+    (tokens, current)
+}
+
+/// Advance the grammar state machine by consuming one complete token.
+fn advance(
+    state: GrammarState,
+    token: &str,
+    tables: &[String],
+    columns: &HashMap<String, Vec<String>>,
+) -> GrammarState {
+    let lower = token.to_lowercase();
+    match state {
+        GrammarState::Initial => {
+            if let Some(t) = tables.iter().find(|t| t.to_lowercase() == lower) {
+                GrammarState::AfterTable { table: t.clone() }
+            } else {
+                GrammarState::Error
+            }
+        }
+        GrammarState::AfterTable { table } => match lower.as_str() {
+            "where" => GrammarState::AfterWhere { table },
+            "to" => GrammarState::AfterTo { from: table },
+            _ => GrammarState::Error,
+        },
+        GrammarState::AfterWhere { ref table } => {
+            let cols = columns.get(table).map(|v| v.as_slice()).unwrap_or(&[]);
+            if cols.iter().any(|c| c.to_lowercase() == lower) {
+                GrammarState::AfterColumn { table: table.clone() }
+            } else {
+                GrammarState::Error
+            }
+        }
+        GrammarState::AfterColumn { table } => {
+            const OPS: &[&str] = &[
+                "=", "!=", "<", "<=", ">", ">=", "startswith", "endswith", "contains",
+            ];
+            if OPS.iter().any(|op| *op == lower.as_str()) {
+                GrammarState::AfterOp { table }
+            } else {
+                GrammarState::Error
+            }
+        }
+        GrammarState::AfterOp { table } => {
+            // Any token is accepted as a value.
+            GrammarState::AfterValue { table }
+        }
+        GrammarState::AfterValue { table } => match lower.as_str() {
+            "and" => GrammarState::AfterWhere { table },
+            _ => GrammarState::Error,
+        },
+        GrammarState::AfterTo { from } => {
+            if let Some(t) = tables.iter().find(|t| t.to_lowercase() == lower) {
+                GrammarState::AfterToTable { from, to: t.clone() }
+            } else {
+                GrammarState::Error
+            }
+        }
+        GrammarState::AfterToTable { from, to } => match lower.as_str() {
+            "via" => GrammarState::AfterVia { from, to },
+            _ => GrammarState::Error,
+        },
+        GrammarState::AfterVia { from, to } => {
+            if tables.iter().any(|t| t.to_lowercase() == lower) {
+                GrammarState::AfterViaTable { from, to }
+            } else {
+                GrammarState::Error
+            }
+        }
+        GrammarState::AfterViaTable { from, to } => match lower.as_str() {
+            "," => GrammarState::AfterVia { from, to },
+            _ => GrammarState::Error,
+        },
+        GrammarState::Error => GrammarState::Error,
+    }
+}
+
+/// Return the exhaustive set of valid next completions for the given grammar state.
+fn valid_completions_for_state(
+    state: &GrammarState,
+    tables: &[String],
+    columns: &HashMap<String, Vec<String>>,
+) -> Vec<Completion> {
+    match state {
+        GrammarState::Initial => tables.iter().map(|t| Completion::Token(t.clone())).collect(),
+        GrammarState::AfterTable { .. } => vec![
+            Completion::Token("where".to_string()),
+            Completion::Token("to".to_string()),
+        ],
+        GrammarState::AfterWhere { table } => columns
+            .get(table)
+            .map(|cols| cols.iter().map(|c| Completion::Token(c.clone())).collect())
+            .unwrap_or_default(),
+        GrammarState::AfterColumn { .. } => [
+            "=", "!=", "<", "<=", ">", ">=", "startswith", "endswith", "contains",
+        ]
+        .iter()
+        .map(|op| Completion::Token(op.to_string()))
+        .collect(),
+        GrammarState::AfterOp { .. } => vec![Completion::QuotedValue],
+        GrammarState::AfterValue { .. } => vec![Completion::Token("and".to_string())],
+        GrammarState::AfterTo { .. } => {
+            tables.iter().map(|t| Completion::Token(t.clone())).collect()
+        }
+        GrammarState::AfterToTable { .. } => vec![Completion::Token("via".to_string())],
+        GrammarState::AfterVia { .. } => {
+            tables.iter().map(|t| Completion::Token(t.clone())).collect()
+        }
+        GrammarState::AfterViaTable { .. } => vec![Completion::Token(",".to_string())],
+        GrammarState::Error => vec![],
+    }
+}
+
+/// Return the valid next completions at the current cursor position in `input`.
+///
+/// Drives the grammar state machine with the complete tokens already typed, then
+/// filters valid next-token candidates by the prefix of the last partial word.
+///
+/// `tables` is the list of known table names; `columns` maps each table name to
+/// its column names. Both are used for context-sensitive suggestions.
+pub fn completions_at(
+    input: &str,
+    tables: &[String],
+    columns: &HashMap<String, Vec<String>>,
+) -> Vec<Completion> {
+    let (tokens, partial) = tokenize_partial(input);
+
+    let mut state = GrammarState::Initial;
+    for token in &tokens {
+        state = advance(state, token, tables, columns);
+    }
+
+    let candidates = valid_completions_for_state(&state, tables, columns);
+
+    if partial.is_empty() {
+        candidates
+    } else {
+        candidates
+            .into_iter()
+            .filter(|c| match c {
+                Completion::Token(s) => s.to_lowercase().starts_with(&partial.to_lowercase()),
+                // Show the value placeholder only when the user has opened a quote.
+                Completion::QuotedValue => {
+                    partial.starts_with('\'') || partial.starts_with('"')
+                }
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 /// A condition operator for filter rules.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -54,8 +290,12 @@ pub enum Rule {
     Relation {
         from_table: String,
         to_table: String,
-        /// Explicit via-path, if already selected by the user.
+        /// Explicit via-path supplied by the user (intermediate table names).
         via: Vec<String>,
+        /// The resolved path chosen at execution time (auto or manual).
+        /// Stored so re-execution uses the exact same path even if new virtual
+        /// FKs later make the route ambiguous.
+        resolved_path: Option<TablePath>,
     },
 }
 
@@ -63,18 +303,32 @@ impl std::fmt::Display for Rule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Rule::Filter { table, conditions } => {
-                write!(f, "{} where ", table)?;
-                let parts: Vec<String> = conditions.iter().map(|c| c.to_string()).collect();
-                write!(f, "{}", parts.join(" and "))
+                if conditions.is_empty() {
+                    write!(f, "{}", table)
+                } else {
+                    let parts: Vec<String> = conditions.iter().map(|c| c.to_string()).collect();
+                    write!(f, "{} where {}", table, parts.join(" and "))
+                }
             }
             Rule::Relation {
                 from_table,
                 to_table,
                 via,
+                resolved_path,
             } => {
                 write!(f, "{} to {}", from_table, to_table)?;
                 if !via.is_empty() {
                     write!(f, " via {}", via.join(", "))?;
+                } else if let Some(path) = resolved_path {
+                    let intermediates: Vec<String> = path
+                        .steps
+                        .iter()
+                        .skip(1)
+                        .map(|s| s.from_table.clone())
+                        .collect();
+                    if !intermediates.is_empty() {
+                        write!(f, " via {}", intermediates.join(", "))?;
+                    }
                 }
                 Ok(())
             }
@@ -116,6 +370,7 @@ pub fn parse_rule(input: &str) -> Result<Rule, String> {
             from_table,
             to_table,
             via,
+            resolved_path: None,
         });
     }
 
@@ -303,6 +558,7 @@ mod tests {
                 from_table: "user".to_string(),
                 to_table: "location".to_string(),
                 via: vec![],
+                resolved_path: None,
             }
         );
     }
@@ -316,6 +572,7 @@ mod tests {
                 from_table: "user".to_string(),
                 to_table: "location".to_string(),
                 via: vec!["location_assignments".to_string()],
+                resolved_path: None,
             }
         );
     }
@@ -337,7 +594,151 @@ mod tests {
             from_table: "user".to_string(),
             to_table: "location".to_string(),
             via: vec!["location_assignments".to_string()],
+            resolved_path: None,
         };
         assert_eq!(r.to_string(), "user to location via location_assignments");
+    }
+
+    // ---------------------------------------------------------------------------
+    // completions_at tests
+    // ---------------------------------------------------------------------------
+
+    fn tables() -> Vec<String> {
+        vec!["users".to_string(), "orders".to_string(), "products".to_string()]
+    }
+
+    fn columns() -> HashMap<String, Vec<String>> {
+        let mut m = HashMap::new();
+        m.insert(
+            "users".to_string(),
+            vec!["id".to_string(), "name".to_string(), "email".to_string()],
+        );
+        m.insert(
+            "orders".to_string(),
+            vec!["id".to_string(), "user_id".to_string(), "total".to_string()],
+        );
+        m
+    }
+
+    #[test]
+    fn test_completions_initial_all_tables() {
+        let c = completions_at("", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("users".to_string())));
+        assert!(c.contains(&Completion::Token("orders".to_string())));
+        assert!(c.contains(&Completion::Token("products".to_string())));
+    }
+
+    #[test]
+    fn test_completions_initial_prefix_filter() {
+        let c = completions_at("us", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("users".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_table() {
+        let c = completions_at("users ", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("where".to_string())));
+        assert!(c.contains(&Completion::Token("to".to_string())));
+    }
+
+    #[test]
+    fn test_completions_after_table_partial_where() {
+        let c = completions_at("users wh", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("where".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_where_shows_columns() {
+        let c = completions_at("users where ", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("name".to_string())));
+        assert!(c.contains(&Completion::Token("email".to_string())));
+    }
+
+    #[test]
+    fn test_completions_after_where_partial_column() {
+        let c = completions_at("users where na", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("name".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_column_shows_operators() {
+        let c = completions_at("users where name ", &tables(), &columns());
+        let tokens: Vec<_> = c.iter().filter_map(|x| if let Completion::Token(s) = x { Some(s.as_str()) } else { None }).collect();
+        assert!(tokens.contains(&"="));
+        assert!(tokens.contains(&"startswith"));
+        assert!(tokens.contains(&"contains"));
+    }
+
+    #[test]
+    fn test_completions_after_column_partial_op() {
+        let c = completions_at("users where name starts", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("startswith".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_op_shows_value_placeholder() {
+        let c = completions_at("users where name = ", &tables(), &columns());
+        assert_eq!(c, vec![Completion::QuotedValue]);
+    }
+
+    #[test]
+    fn test_completions_after_op_partial_quote_shows_placeholder() {
+        let c = completions_at("users where name = '", &tables(), &columns());
+        assert_eq!(c, vec![Completion::QuotedValue]);
+    }
+
+    #[test]
+    fn test_completions_after_value_shows_and() {
+        let c = completions_at("users where name = 'Rick' ", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("and".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_and_shows_columns() {
+        let c = completions_at("users where name = 'Rick' and ", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("email".to_string())));
+    }
+
+    #[test]
+    fn test_completions_after_to_shows_tables() {
+        let c = completions_at("users to ", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("orders".to_string())));
+        assert!(c.contains(&Completion::Token("products".to_string())));
+    }
+
+    #[test]
+    fn test_completions_after_to_table_shows_via() {
+        let c = completions_at("users to orders ", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("via".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_via_shows_tables() {
+        let c = completions_at("users to orders via ", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("products".to_string())));
+    }
+
+    #[test]
+    fn test_completions_after_via_table_shows_comma() {
+        let c = completions_at("users to orders via products ", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token(",".to_string())]);
+    }
+
+    #[test]
+    fn test_completions_after_comma_in_via_shows_tables() {
+        let c = completions_at("users to orders via products,", &tables(), &columns());
+        assert!(c.contains(&Completion::Token("users".to_string())));
+    }
+
+    #[test]
+    fn test_completions_error_state_empty() {
+        let c = completions_at("users where nonsense gobbledygook ", &tables(), &columns());
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn test_completions_case_insensitive_table() {
+        let c = completions_at("USERS wh", &tables(), &columns());
+        assert_eq!(c, vec![Completion::Token("where".to_string())]);
     }
 }
