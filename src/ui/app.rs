@@ -1,0 +1,141 @@
+use crate::rules::Rule;
+use crate::schema::TablePath;
+
+/// All possible modes the UI can be in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mode {
+    /// Normal navigation mode.
+    Normal,
+    /// User is typing a command.
+    Command,
+    /// User is being asked to pick among multiple paths.
+    PathSelection,
+    /// User is reordering rules.
+    RuleReorder,
+    /// Error message displayed.
+    Error(String),
+    /// Informational message displayed.
+    Info(String),
+}
+
+/// Application state, passed to the renderer.
+pub struct AppState {
+    pub mode: Mode,
+    /// Flat index of the currently selected tree row.
+    pub selected_row: usize,
+    /// Number of visible rows in last render (for scroll bounds).
+    pub visible_row_count: usize,
+    /// Vertical scroll offset for the data viewer.
+    pub scroll_offset: usize,
+    /// Current command input buffer.
+    pub input: String,
+    /// Cursor position within `input`.
+    pub cursor: usize,
+    /// Paths presented to the user for selection (PathSelection mode).
+    pub paths: Vec<TablePath>,
+    /// Currently highlighted path index.
+    pub path_cursor: usize,
+    /// Table names from the schema, for display.
+    pub table_names: Vec<String>,
+    /// Rules list.
+    pub rules: Vec<Rule>,
+    /// Selected rule index (for reorder mode).
+    pub rule_cursor: usize,
+    /// Whether to show the schema sidebar.
+    pub show_schema: bool,
+    /// Column-add mode: which node index and available columns.
+    pub column_add: Option<(usize, Vec<String>, usize)>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            mode: Mode::Normal,
+            selected_row: 0,
+            visible_row_count: 0,
+            scroll_offset: 0,
+            input: String::new(),
+            cursor: 0,
+            paths: Vec::new(),
+            path_cursor: 0,
+            table_names: Vec::new(),
+            rules: Vec::new(),
+            rule_cursor: 0,
+            show_schema: false,
+            column_add: None,
+        }
+    }
+
+    /// Move selection up.
+    pub fn select_up(&mut self) {
+        if self.selected_row > 0 {
+            self.selected_row -= 1;
+            self.clamp_scroll();
+        }
+    }
+
+    /// Move selection down.
+    pub fn select_down(&mut self) {
+        if self.selected_row + 1 < self.visible_row_count {
+            self.selected_row += 1;
+            self.clamp_scroll();
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        // Keep selected row visible
+        if self.selected_row < self.scroll_offset {
+            self.scroll_offset = self.selected_row;
+        }
+    }
+
+    /// Insert a character at the cursor.
+    pub fn input_char(&mut self, ch: char) {
+        self.input.insert(self.cursor, ch);
+        self.cursor += 1;
+    }
+
+    /// Delete character before cursor.
+    pub fn input_backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.input.remove(self.cursor);
+        }
+    }
+
+    /// Delete character at cursor.
+    pub fn input_delete(&mut self) {
+        if self.cursor < self.input.len() {
+            self.input.remove(self.cursor);
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.cursor < self.input.len() {
+            self.cursor += 1;
+        }
+    }
+
+    /// Clear the input buffer.
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+    }
+
+    /// Get text entered so far.
+    pub fn input_text(&self) -> &str {
+        &self.input
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
