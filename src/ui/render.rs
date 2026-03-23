@@ -245,24 +245,39 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
     let area = centered_rect(60, 50, f.area());
     f.render_widget(Clear, area);
 
-    let items: Vec<ListItem> = state
-        .rules
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let text = format!("{}. {}", i + 1, r);
+    let mut items: Vec<ListItem> = Vec::new();
+    const SLOT_LABEL: &str = "next insertion";
+
+    if state.rules.is_empty() {
+        items.push(ListItem::new(format!("→ {}", SLOT_LABEL)).style(Style::default().fg(Color::DarkGray)));
+    } else {
+        for (i, r) in state.rules.iter().enumerate() {
+            if i == state.next_rule_cursor {
+                items.push(
+                    ListItem::new(format!("→ {}", SLOT_LABEL))
+                        .style(Style::default().fg(Color::DarkGray)),
+                );
+            }
+
+            let text = format!("   {}. {}", i + 1, r);
             let item = ListItem::new(text);
             if i == state.rule_cursor {
-                item.style(Style::default().bg(Color::Blue).fg(Color::White))
+                items.push(item.style(Style::default().bg(Color::Blue).fg(Color::White)));
             } else {
-                item
+                items.push(item);
             }
-        })
-        .collect();
+        }
+        if state.next_rule_cursor == state.rules.len() {
+            items.push(
+                ListItem::new(format!("→ {}", SLOT_LABEL))
+                    .style(Style::default().fg(Color::DarkGray)),
+            );
+        }
+    }
 
     let list = List::new(items).block(
         Block::default()
-            .title(" Rules (↑↓ move cursor, u/d swap, Enter apply, Esc cancel) ")
+            .title(" Rules (↑↓ move cursor, u/d swap, x delete, i/o set insertion, z undo, y redo, Enter apply, Esc cancel) ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Yellow)),
     );

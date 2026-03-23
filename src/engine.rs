@@ -230,6 +230,9 @@ impl Engine {
     pub async fn reexecute_all(&mut self, db: &dyn Database) -> Result<()> {
         self.roots.clear();
         let rules = self.rules.clone();
+        // Replay against a clean rules buffer so execute_rule doesn't append
+        // duplicates during re-execution.
+        self.rules.clear();
         for rule in rules {
             self.execute_rule(db, rule).await?;
         }

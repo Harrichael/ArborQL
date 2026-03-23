@@ -41,6 +41,12 @@ pub struct AppState {
     pub rules: Vec<Rule>,
     /// Selected rule index (for reorder mode).
     pub rule_cursor: usize,
+    /// Next insertion position for newly added rules.
+    pub next_rule_cursor: usize,
+    /// Undo stack for rule reorder mode snapshots: (rules, cursor, next cursor).
+    pub rule_reorder_undo: Vec<(Vec<Rule>, usize, usize)>,
+    /// Redo stack for rule reorder mode snapshots: (rules, cursor, next cursor).
+    pub rule_reorder_redo: Vec<(Vec<Rule>, usize, usize)>,
     /// Whether to show the schema sidebar.
     pub show_schema: bool,
     /// Column-add mode: which node index and available columns.
@@ -61,6 +67,9 @@ impl AppState {
             table_names: Vec::new(),
             rules: Vec::new(),
             rule_cursor: 0,
+            next_rule_cursor: 0,
+            rule_reorder_undo: Vec::new(),
+            rule_reorder_redo: Vec::new(),
             show_schema: false,
             column_add: None,
         }
