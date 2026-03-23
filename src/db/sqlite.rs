@@ -12,6 +12,10 @@ impl SqliteDb {
         let pool = SqlitePool::connect(url).await?;
         Ok(Self { pool })
     }
+
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 }
 
 #[async_trait]
