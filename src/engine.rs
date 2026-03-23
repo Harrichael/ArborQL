@@ -322,6 +322,7 @@ pub fn available_extra_columns(node: &DataNode) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::db::Value;
+    use crate::rules;
     use crate::schema::PathStep;
 
     use std::collections::HashMap;
@@ -459,5 +460,70 @@ mod tests {
         let product = &item.children[0];
         assert_eq!(product.table, "products");
         assert_eq!(product.children.len(), 0);
+    }
+
+    fn tree_signature(nodes: &[DataNode]) -> Vec<String> {
+        fn walk(nodes: &[DataNode], prefix: &str, out: &mut Vec<String>) {
+            for (i, node) in nodes.iter().enumerate() {
+                let id = node
+                    .row
+                    .get("id")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let here = format!("{}{}:{}#{}", prefix, i, node.table, id);
+                out.push(here.clone());
+                let child_prefix = format!("{}>", here);
+                walk(&node.children, &child_prefix, out);
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(nodes, "", &mut out);
+        out
+    }
+
+    #[tokio::test]
+    async fn test_reinsert_root_rule_before_relation_replays_consistently() {
+        let db = setup_test_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+        let mut engine = Engine::new(schema);
+
+        let users_rule = rules::parse_rule("users").unwrap();
+        let relation_rule = rules::parse_rule("users to products").unwrap();
+
+        engine.execute_rule(&db, users_rule.clone()).await.unwrap();
+        engine
+            .execute_rule(&db, relation_rule.clone())
+            .await
+            .unwrap();
+
+        let baseline_sig = tree_signature(&engine.roots);
+        assert!(
+            baseline_sig.iter().any(|s| s.contains(":products#")),
+            "baseline should include products"
+        );
+
+        // Simulate deleting the root-producing rule and applying reorder.
+        engine.rules.retain(|r| r != &users_rule);
+        engine.reexecute_all(&db).await.unwrap();
+        let after_delete_sig = tree_signature(&engine.roots);
+        assert!(
+            !after_delete_sig.iter().any(|s| s.contains(":products#")),
+            "without users rule, products should not remain from stale state"
+        );
+
+        // Simulate setting insertion to beginning and adding users back.
+        engine.rules.insert(0, users_rule);
+        engine.reexecute_all(&db).await.unwrap();
+        let restored_sig = tree_signature(&engine.roots);
+
+        assert!(
+            restored_sig.iter().any(|s| s.contains(":products#")),
+            "reinserted users rule should restore products through relation rule"
+        );
+        assert_eq!(
+            restored_sig, baseline_sig,
+            "restored response should match original baseline response"
+        );
     }
 }
