@@ -1,5 +1,6 @@
 use crate::rules::Rule;
 use crate::schema::TablePath;
+use std::collections::HashMap;
 
 /// All possible modes the UI can be in.
 #[derive(Debug, Clone, PartialEq)]
@@ -16,6 +17,13 @@ pub enum Mode {
     Error(String),
     /// Informational message displayed.
     Info(String),
+}
+
+/// Working item in column manager overlay.
+#[derive(Debug, Clone)]
+pub struct ColumnManagerItem {
+    pub name: String,
+    pub enabled: bool,
 }
 
 /// Application state, passed to the renderer.
@@ -49,8 +57,12 @@ pub struct AppState {
     pub rule_reorder_redo: Vec<(Vec<Rule>, usize, usize)>,
     /// Whether to show the schema sidebar.
     pub show_schema: bool,
-    /// Column-add mode: which node index and available columns.
-    pub column_add: Option<(usize, Vec<String>, usize)>,
+    /// Tree-level visible columns by table.
+    pub tree_visible_columns: HashMap<String, Vec<String>>,
+    /// Full tree-level column ordering by table (enabled + disabled).
+    pub tree_column_order: HashMap<String, Vec<String>>,
+    /// Column manager mode: table, editable list (ordered + enabled), cursor.
+    pub column_add: Option<(String, Vec<ColumnManagerItem>, usize)>,
 }
 
 impl AppState {
@@ -71,6 +83,8 @@ impl AppState {
             rule_reorder_undo: Vec::new(),
             rule_reorder_redo: Vec::new(),
             show_schema: false,
+            tree_visible_columns: HashMap::new(),
+            tree_column_order: HashMap::new(),
             column_add: None,
         }
     }

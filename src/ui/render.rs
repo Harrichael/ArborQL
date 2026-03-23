@@ -108,7 +108,41 @@ fn render_data_viewer(
             } else {
                 "  "
             };
-            let summary = node.summary();
+            let mut default_cols: Vec<String> = node.row.keys().cloned().collect();
+            default_cols.sort();
+            let summary_cols = state
+                .tree_visible_columns
+                .get(&node.table)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let preferred = ["id", "name", "title", "label"];
+                    let mut cols: Vec<String> = preferred
+                        .iter()
+                        .filter_map(|c| {
+                            if default_cols.iter().any(|k| k == c) {
+                                Some((*c).to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if cols.is_empty() && !default_cols.is_empty() {
+                        cols.push(default_cols[0].clone());
+                    }
+                    cols
+                });
+            let summary = if summary_cols.is_empty() {
+                node.summary()
+            } else {
+                let parts: Vec<String> = summary_cols
+                    .iter()
+                    .map(|c| {
+                        let v = node.row.get(c).map(|v| v.to_string()).unwrap_or_default();
+                        format!("{}: {}", c, v)
+                    })
+                    .collect();
+                parts.join("  │  ")
+            };
             let table_label = format!("[{}]", node.table);
             let line = Line::from(vec![
                 Span::raw(indent),
@@ -131,11 +165,12 @@ fn render_data_viewer(
         })
         .collect();
 
-    // Show columns for selected node
+    // Show all columns for selected node
     let col_info = if !flat.is_empty() && state.selected_row < flat.len() {
         let (_, node) = flat[state.selected_row];
-        let cols: Vec<String> = node
-            .visible_columns
+        let mut all_cols: Vec<String> = node.row.keys().cloned().collect();
+        all_cols.sort();
+        let cols: Vec<String> = all_cols
             .iter()
             .map(|c| {
                 let v = node.row.get(c).map(|v| v.to_string()).unwrap_or_default();
@@ -285,15 +320,16 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
 }
 
 fn render_column_add(f: &mut Frame, state: &AppState) {
-    if let Some((_, ref cols, cursor)) = state.column_add {
+    if let Some((ref table, ref items, cursor)) = state.column_add {
         let area = centered_rect(50, 40, f.area());
         f.render_widget(Clear, area);
 
-        let items: Vec<ListItem> = cols
+        let list_items: Vec<ListItem> = items
             .iter()
             .enumerate()
-            .map(|(i, c)| {
-                let item = ListItem::new(c.clone());
+            .map(|(i, col)| {
+                let marker = if col.enabled { "[x]" } else { "[ ]" };
+                let item = ListItem::new(format!("{} {}", marker, col.name));
                 if i == cursor {
                     item.style(Style::default().bg(Color::Green).fg(Color::Black))
                 } else {
@@ -302,9 +338,12 @@ fn render_column_add(f: &mut Frame, state: &AppState) {
             })
             .collect();
 
-        let list = List::new(items).block(
+        let list = List::new(list_items).block(
             Block::default()
-                .title(" Add column (↑↓ navigate, Enter add, Esc cancel) ")
+                .title(format!(
+                    " Columns for '{}' (↑↓ nav, space/x toggle, u/d reorder, Enter apply, Esc cancel) ",
+                    table
+                ))
                 .borders(Borders::ALL),
         );
         f.render_widget(list, area);

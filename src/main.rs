@@ -11,11 +11,11 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use engine::{Engine, available_extra_columns, flatten_tree};
+use engine::{Engine, flatten_tree};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use schema::Schema;
 use std::io;
-use ui::app::{AppState, Mode};
+use ui::app::{AppState, ColumnManagerItem, Mode};
 
 /// ArborQL — Navigate complex datasets from multiple sources intuitively.
 #[derive(Parser, Debug)]
@@ -130,6 +130,108 @@ fn place_last_added_rule_at_next_cursor(state: &mut AppState, engine: &mut Engin
     false
 }
 
+fn columns_for_table(roots: &[engine::DataNode], table: &str) -> Vec<String> {
+    fn walk(nodes: &[engine::DataNode], table: &str, out: &mut Option<Vec<String>>) {
+        for node in nodes {
+            if node.table == table {
+                let mut cols: Vec<String> = node.row.keys().cloned().collect();
+                cols.sort();
+                *out = Some(cols);
+                return;
+            }
+            walk(&node.children, table, out);
+            if out.is_some() {
+                return;
+            }
+        }
+    }
+
+    let mut found = None;
+    walk(roots, table, &mut found);
+    found.unwrap_or_default()
+}
+
+fn ensure_tree_visibility_for_node(state: &mut AppState, node: &engine::DataNode) {
+    fn default_tree_columns(node: &engine::DataNode) -> Vec<String> {
+        let mut all_cols: Vec<String> = node.row.keys().cloned().collect();
+        all_cols.sort();
+        let preferred = ["id", "name", "title", "label"];
+        let mut visible: Vec<String> = preferred
+            .iter()
+            .filter_map(|c| {
+                if all_cols.iter().any(|k| k == c) {
+                    Some((*c).to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if visible.is_empty() && !all_cols.is_empty() {
+            visible.push(all_cols[0].clone());
+        }
+        visible
+    }
+
+    state
+        .tree_visible_columns
+        .entry(node.table.clone())
+        .or_insert_with(|| default_tree_columns(node));
+    state
+        .tree_column_order
+        .entry(node.table.clone())
+        .or_insert_with(|| {
+            let mut all_cols: Vec<String> = node.row.keys().cloned().collect();
+            all_cols.sort();
+            let defaults = default_tree_columns(node);
+            let default_set: std::collections::HashSet<String> =
+                defaults.iter().cloned().collect();
+
+            let mut ordered = defaults;
+            for c in all_cols {
+                if !default_set.contains(&c) {
+                    ordered.push(c);
+                }
+            }
+            ordered
+        });
+}
+
+fn column_manager_items_for_table(
+    state: &AppState,
+    roots: &[engine::DataNode],
+    table: &str,
+) -> Vec<ColumnManagerItem> {
+    let all_cols = columns_for_table(roots, table);
+    let shown = state
+        .tree_visible_columns
+        .get(table)
+        .cloned()
+        .unwrap_or_default();
+    let mut ordered = state
+        .tree_column_order
+        .get(table)
+        .cloned()
+        .unwrap_or_default();
+
+    for c in &all_cols {
+        if !ordered.contains(c) {
+            ordered.push(c.clone());
+        }
+    }
+    ordered.retain(|c| all_cols.contains(c));
+
+    let shown_set: std::collections::HashSet<String> =
+        shown.iter().cloned().collect();
+
+    ordered
+        .into_iter()
+        .map(|name| ColumnManagerItem {
+            enabled: shown_set.contains(&name),
+            name,
+        })
+        .collect()
+}
+
 /// Returns `false` when the application should quit.
 async fn handle_key(
     key: crossterm::event::KeyEvent,
@@ -138,6 +240,69 @@ async fn handle_key(
     db: &dyn db::Database,
     pending_paths: &mut Option<(rules::Rule, Vec<schema::TablePath>)>,
 ) -> Result<bool> {
+    // Column manager overlay has exclusive key handling while open.
+    if state.column_add.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                state.column_add = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some((_, _, ref mut cursor)) = state.column_add {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some((_, ref items, ref mut cursor)) = state.column_add {
+                    if *cursor + 1 < items.len() {
+                        *cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Char('u') => {
+                if let Some((_, ref mut items, ref mut cursor)) = state.column_add {
+                    if *cursor > 0 {
+                        items.swap(*cursor, *cursor - 1);
+                        *cursor -= 1;
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some((_, ref mut items, ref mut cursor)) = state.column_add {
+                    if *cursor + 1 < items.len() {
+                        items.swap(*cursor, *cursor + 1);
+                        *cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Char('x') => {
+                if let Some((_, ref mut items, cursor)) = state.column_add {
+                    if let Some(item) = items.get_mut(cursor) {
+                        item.enabled = !item.enabled;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((table, ref items, _)) = state.column_add.clone() {
+                    let enabled: Vec<String> = items
+                        .iter()
+                        .filter(|i| i.enabled)
+                        .map(|i| i.name.clone())
+                        .collect();
+                    state.tree_visible_columns.insert(table.clone(), enabled);
+                    state.tree_column_order.insert(
+                        table,
+                        items.iter().map(|i| i.name.clone()).collect(),
+                    );
+                }
+                state.column_add = None;
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
     match state.mode.clone() {
         // ── Normal mode ──────────────────────────────────────────────────
         Mode::Normal => {
@@ -171,17 +336,18 @@ async fn handle_key(
                     }
                 }
                 KeyCode::Char('c') => {
-                    // Add column to selected node
+                    // Manage table-level tree columns for selected node's table.
                     let flat = flatten_tree(&engine.roots);
                     if state.selected_row < flat.len() {
                         let (_, node) = flat[state.selected_row];
-                        let extras = available_extra_columns(node);
-                        if !extras.is_empty() {
-                            let mut sorted_extras = extras;
-                            sorted_extras.sort();
-                            state.column_add = Some((state.selected_row, sorted_extras, 0));
-                        } else {
-                            state.mode = Mode::Info("No extra columns available".to_string());
+                        ensure_tree_visibility_for_node(state, node);
+                        let items = column_manager_items_for_table(
+                            state,
+                            &engine.roots,
+                            &node.table,
+                        );
+                        if !items.is_empty() {
+                            state.column_add = Some((node.table.clone(), items, 0));
                         }
                     }
                 }
@@ -375,37 +541,6 @@ async fn handle_key(
         }
     }
 
-    // Handle column-add overlay (independent of mode)
-    if state.column_add.is_some() {
-        match key.code {
-            KeyCode::Esc => {
-                state.column_add = None;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some((_, _, ref mut cursor)) = state.column_add {
-                    if *cursor > 0 {
-                        *cursor -= 1;
-                    }
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some((_, ref cols, ref mut cursor)) = state.column_add {
-                    if *cursor + 1 < cols.len() {
-                        *cursor += 1;
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                if let Some((row_idx, ref cols, cursor)) = state.column_add.clone() {
-                    let col_name = cols[cursor].clone();
-                    add_column_to_node(&mut engine.roots, row_idx, &col_name);
-                }
-                state.column_add = None;
-            }
-            _ => {}
-        }
-    }
-
     Ok(true)
 }
 
@@ -462,33 +597,6 @@ fn toggle_fold_recursive(
         }
         *counter += 1;
         if !node.collapsed && toggle_fold_recursive(&mut node.children, target, counter) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Add `col_name` to the visible columns of the node at `flat_idx`.
-fn add_column_to_node(roots: &mut [engine::DataNode], flat_idx: usize, col_name: &str) {
-    let mut counter = 0usize;
-    add_column_recursive(roots, flat_idx, col_name, &mut counter);
-}
-
-fn add_column_recursive(
-    nodes: &mut [engine::DataNode],
-    target: usize,
-    col_name: &str,
-    counter: &mut usize,
-) -> bool {
-    for node in nodes.iter_mut() {
-        if *counter == target {
-            if !node.visible_columns.contains(&col_name.to_string()) {
-                node.visible_columns.push(col_name.to_string());
-            }
-            return true;
-        }
-        *counter += 1;
-        if add_column_recursive(&mut node.children, target, col_name, counter) {
             return true;
         }
     }

@@ -373,6 +373,24 @@ mod tests {
         assert!(node.summary().contains("id") || node.summary().contains("name"));
     }
 
+    #[test]
+    fn test_available_extra_columns_when_row_has_more_fields() {
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), Value::Integer(1));
+        row.insert("name".to_string(), Value::Text("Alice".to_string()));
+        row.insert("email".to_string(), Value::Text("alice@example.com".to_string()));
+        row.insert("created_at".to_string(), Value::Text("2026-01-01".to_string()));
+
+        let node = DataNode::new("users".to_string(), row);
+        let mut extras = available_extra_columns(&node);
+        extras.sort();
+
+        assert!(
+            extras.is_empty(),
+            "with all columns visible by default, node-level extras should be empty"
+        );
+    }
+
     /// Create an in-memory SQLite database with a 3-table schema mirroring the
     /// users → orders → order_items → products chain.
     async fn setup_test_db() -> crate::db::sqlite::SqliteDb {
