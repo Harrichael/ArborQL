@@ -1,0 +1,1 @@
+{ columns: { default: ["id", "name"] } }

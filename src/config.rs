@@ -50,8 +50,9 @@ pub fn load_column_defaults(cwd: &Path) -> Result<ColumnDefaults> {
     let config_files = discover_config_files(cwd)?;
     let mut merged = ColumnDefaults::default();
 
-    for file in config_files {
-        let raw = fs::read_to_string(&file)
+    // Apply most-generic first so more-specific configs win (last write wins).
+    for file in config_files.iter().rev() {
+        let raw = fs::read_to_string(file)
             .with_context(|| format!("failed to read config file: {}", file.display()))?;
         let rendered = evaluate_with_filename(raw.trim(), &file.display().to_string())
             .map_err(|e| anyhow::anyhow!("jsonnet eval failed for {}: {}", file.display(), e))?;
@@ -81,44 +82,35 @@ fn apply_layer(target: &mut ColumnDefaults, layer: RawConfig) {
 
 fn discover_config_files(cwd: &Path) -> Result<Vec<PathBuf>> {
     let home = home_dir()?;
-    let mut files = Vec::new();
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
 
-    let home_cfg = home.join(".arborql").join("config.jsonnet");
-    if home_cfg.is_file() {
-        files.push(home_cfg);
-    }
-
-    let mut current = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    // Walk from cwd upward — most specific (cwd) first, most generic (root) last.
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut current = cwd.clone();
     loop {
-        if is_same_or_child_of(&current, &home) {
-            let cfg = current.join(".arborql").join("config.jsonnet");
-            if cfg.is_file() {
-                files.push(cfg);
-            }
-            if current == home {
-                break;
-            }
-            if !current.pop() {
-                break;
-            }
-        } else {
-            if !current.pop() {
-                break;
-            }
+        let cfg = current.join(".arborql").join("default.jsonnet");
+        if cfg.is_file() {
+            found.push(cfg);
+        }
+        if !current.pop() {
+            break;
         }
     }
 
-    Ok(files)
+    // If home was not encountered in the walk (cwd is outside $HOME),
+    // append it as the most generic fallback.
+    let home_cfg = home.join(".arborql").join("default.jsonnet");
+    if home_cfg.is_file() && !found.contains(&home_cfg) {
+        found.push(home_cfg);
+    }
+
+    Ok(found)
 }
 
 fn home_dir() -> Result<PathBuf> {
     std::env::var("HOME")
         .map(PathBuf::from)
         .context("HOME environment variable is not set")
-}
-
-fn is_same_or_child_of(path: &Path, parent: &Path) -> bool {
-    path == parent || path.starts_with(parent)
 }
 
 #[cfg(test)]
@@ -153,12 +145,12 @@ mod tests {
         fs::create_dir_all(cwd.join(".arborql")).unwrap();
 
         fs::write(
-            home.join(".arborql/config.jsonnet"),
+            home.join(".arborql/default.jsonnet"),
             r#"{ columns: { default: ["id", "name"], tables: { orders: { default: ["id", "status"] } } } }"#,
         )
         .unwrap();
         fs::write(
-            cwd.join(".arborql/config.jsonnet"),
+            cwd.join(".arborql/default.jsonnet"),
             r#"{ columns: { tables: { users: { default: ["id", "email"] } } } }"#,
         )
         .unwrap();
