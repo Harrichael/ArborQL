@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
     let defaults = config::load_config(&std::env::current_dir()?)?;
     state.default_visible_columns = defaults.columns.global;
     state.default_visible_columns_by_table = defaults.columns.per_table;
+    let history_max_len = defaults.history_max_len;
     // Inject virtual FKs from config.
     for vfk in defaults.virtual_fks {
         state.virtual_fks.push(vfk.clone());
@@ -65,6 +66,18 @@ async fn main() -> Result<()> {
         (name.clone(), cols)
     }).collect();
 
+    // Load persisted command history from ~/.latticeql/history.
+    let history_file = std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".latticeql").join("history"));
+    if let Some(ref path) = history_file {
+        match command_history::CommandHistory::load_from_file(path, history_max_len) {
+            Ok(h) => state.command_history = h,
+            Err(e) => eprintln!("Warning: could not load command history: {}", e),
+        }
+    }
+
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -72,7 +85,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, &mut state, &mut engine, db.as_ref()).await;
+    let result = run_app(&mut terminal, &mut state, &mut engine, db.as_ref(), history_file).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -90,6 +103,7 @@ async fn run_app(
     state: &mut AppState,
     engine: &mut Engine,
     db: &dyn db::Database,
+    history_file: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Pending paths waiting for user selection
     let mut pending_paths: Option<(rules::Rule, Vec<schema::TablePath>)> = None;
@@ -130,6 +144,7 @@ async fn run_app(
                         engine,
                         db,
                         &mut pending_paths,
+                        &history_file,
                     )
                     .await?;
                     if !handled {
@@ -281,6 +296,7 @@ async fn handle_key(
     engine: &mut Engine,
     db: &dyn db::Database,
     pending_paths: &mut Option<(rules::Rule, Vec<schema::TablePath>)>,
+    history_file: &Option<std::path::PathBuf>,
 ) -> Result<bool> {
     // Column manager overlay has exclusive key handling while open.
     if state.column_add.is_some() {
@@ -493,7 +509,15 @@ async fn handle_key(
                         .map(|e| e.text == cmd)
                         .unwrap_or(false);
                     if !navigated_unchanged {
-                        state.command_history.push(cmd.clone());
+                        if state.command_history.push(cmd.clone()) {
+                            if let Some(ref path) = history_file {
+                                if let Some(entry) = state.command_history.entries().last() {
+                                    if let Err(e) = command_history::CommandHistory::append_to_file(entry, path) {
+                                        crate::log::warn(format!("could not save command history: {}", e));
+                                    }
+                                }
+                            }
+                        }
                     }
                     state.history_cursor = None;
                     state.history_draft = String::new();

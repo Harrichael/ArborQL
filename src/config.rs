@@ -33,6 +33,9 @@ impl ColumnDefaults {
 pub struct AppConfig {
     pub columns: ColumnDefaults,
     pub virtual_fks: Vec<VirtualFkDef>,
+    /// Maximum number of history entries to keep in `~/.latticeql/history`.
+    /// Defaults to 10 000 when not set in any config file.
+    pub history_max_len: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,6 +44,9 @@ struct RawConfig {
     columns: RawColumnsConfig,
     #[serde(default)]
     virtual_fks: Vec<RawVirtualFk>,
+    /// Maximum history file length. `null` / absent means "use default".
+    #[serde(default)]
+    history_max_len: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -97,6 +103,7 @@ pub fn load_config(cwd: &Path) -> Result<AppConfig> {
     let config_files = discover_config_files(cwd)?;
     let mut columns = ColumnDefaults::default();
     let mut virtual_fks: Vec<VirtualFkDef> = Vec::new();
+    let mut history_max_len: Option<usize> = None;
 
     // Apply most-generic first so more-specific configs win (last write wins).
     for file in config_files.iter().rev() {
@@ -119,9 +126,17 @@ pub fn load_config(cwd: &Path) -> Result<AppConfig> {
                 virtual_fks.push(vfk);
             }
         }
+        // Most-specific config wins (last write wins in rev iteration).
+        if let Some(v) = parsed.history_max_len {
+            history_max_len = Some(v as usize);
+        }
     }
 
-    Ok(AppConfig { columns, virtual_fks })
+    Ok(AppConfig {
+        columns,
+        virtual_fks,
+        history_max_len: history_max_len.unwrap_or(10_000),
+    })
 }
 
 /// Persist `vfks` into the most-specific config file that was discovered for
