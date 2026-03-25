@@ -67,9 +67,8 @@ async fn main() -> Result<()> {
     }).collect();
 
     // Load persisted command history from ~/.latticeql/history.
-    let history_file = std::env::var("HOME")
+    let history_file = config::home_dir()
         .ok()
-        .map(std::path::PathBuf::from)
         .map(|h| h.join(".latticeql").join("history"));
     if let Some(ref path) = history_file {
         match command_history::CommandHistory::load_from_file(path, history_max_len) {

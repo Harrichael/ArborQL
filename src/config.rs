@@ -217,7 +217,7 @@ fn discover_config_files(cwd: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-fn home_dir() -> Result<PathBuf> {
+pub(crate) fn home_dir() -> Result<PathBuf> {
     std::env::var("HOME")
         .map(PathBuf::from)
         .context("HOME environment variable is not set")
