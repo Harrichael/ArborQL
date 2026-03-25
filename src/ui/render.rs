@@ -9,6 +9,20 @@ use ratatui::{
     Frame,
 };
 
+/// Embedded manuals: (title, content).
+pub const MANUALS: &[(&str, &str)] = &[
+    ("Command Querying Syntax", include_str!("../../manuals/command-syntax.md")),
+    ("Data Viewing",            include_str!("../../manuals/data-viewing.md")),
+    ("Reordering Commands",     include_str!("../../manuals/reordering.md")),
+    ("Column Managers",         include_str!("../../manuals/column-managers.md")),
+    ("Virtual Foreign Keys",    include_str!("../../manuals/virtual-foreign-keys.md")),
+];
+
+/// Return the number of lines in a manual (for scroll bounds).
+pub fn manual_line_count(index: usize) -> usize {
+    MANUALS.get(index).map(|(_, content)| content.lines().count()).unwrap_or(0)
+}
+
 /// Main render entry point.
 pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     let size = f.area();
@@ -53,6 +67,8 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
         Mode::VirtualFkManager { .. } => render_virtual_fk_manager(f, state),
         Mode::VirtualFkAdd(_) => render_virtual_fk_add(f, state),
         Mode::LogViewer { .. } => render_log_viewer(f, state),
+        Mode::ManualList { .. } => render_manual_list(f, state),
+        Mode::ManualView { .. } => render_manual_view(f, state),
         Mode::Error(msg) => {
             let msg = msg.clone();
             render_overlay_message(f, &format!("Error: {}", msg), Color::Red);
@@ -248,7 +264,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         let (title, display) = match &state.mode {
             Mode::Normal => (
                 " LatticeQL ",
-                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  'l' logs  'q' quit",
+                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  'm' manuals  'l' logs  'q' quit",
             ),
             _ => (" LatticeQL ", ""),
         };
@@ -801,4 +817,106 @@ fn render_log_viewer(f: &mut Frame, state: &AppState) {
     *list_state.offset_mut() = offset;
 
     f.render_stateful_widget(list, area, &mut list_state);
+}
+
+fn render_manual_list(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(60, 50, f.area());
+    f.render_widget(Clear, area);
+
+    let cursor = match &state.mode {
+        Mode::ManualList { cursor } => *cursor,
+        _ => 0,
+    };
+
+    let items: Vec<ListItem> = MANUALS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, _))| {
+            let line = Line::from(Span::raw(format!("  {}", title)));
+            if i == cursor {
+                ListItem::new(line).style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+            } else {
+                ListItem::new(line)
+            }
+        })
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(" Manuals — ↑↓/jk navigate  Enter open  Esc/q/m close ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(list, area);
+}
+
+/// Convert a markdown line into a styled ratatui `Line`.
+fn md_line_to_ratatui(raw: &str) -> Line<'static> {
+    let s = raw.to_string();
+    if s.starts_with("# ") {
+        Line::from(Span::styled(
+            s[2..].to_string(),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+    } else if s.starts_with("## ") {
+        Line::from(Span::styled(
+            s[3..].to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+    } else if s.starts_with("### ") {
+        Line::from(Span::styled(
+            s[4..].to_string(),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ))
+    } else if s.starts_with("```") || s == "```" {
+        Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)))
+    } else if s.starts_with("| ") || s.starts_with("|--") || s.starts_with("|---") {
+        Line::from(Span::styled(s, Style::default().fg(Color::White)))
+    } else if s.starts_with("- ") || s.starts_with("* ") {
+        Line::from(vec![
+            Span::styled("• ", Style::default().fg(Color::Yellow)),
+            Span::raw(s[2..].to_string()),
+        ])
+    } else {
+        Line::from(Span::raw(s))
+    }
+}
+
+fn render_manual_view(f: &mut Frame, state: &AppState) {
+    let (index, scroll) = match &state.mode {
+        Mode::ManualView { index, scroll } => (*index, *scroll),
+        _ => return,
+    };
+
+    let Some((title, content)) = MANUALS.get(index) else { return };
+
+    let area = centered_rect(85, 85, f.area());
+    f.render_widget(Clear, area);
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let total_lines = content.lines().count();
+
+    let lines: Vec<Line> = content
+        .lines()
+        .skip(scroll)
+        .take(inner_height)
+        .map(md_line_to_ratatui)
+        .collect();
+
+    let title_str = format!(
+        " {} ({}/{})  ↑↓/jk scroll  Esc/q back ",
+        title,
+        scroll + 1,
+        total_lines
+    );
+
+    let para = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .title(title_str)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
 }

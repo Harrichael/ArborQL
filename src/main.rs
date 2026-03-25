@@ -432,6 +432,9 @@ async fn handle_key(
                 KeyCode::Char('l') => {
                     state.mode = Mode::LogViewer { cursor: state.logs.len().saturating_sub(1) };
                 }
+                KeyCode::Char('m') => {
+                    state.mode = Mode::ManualList { cursor: 0 };
+                }
                 _ => {}
             }
         }
@@ -870,6 +873,50 @@ async fn handle_key(
                     state.wizard_set_cursor(0);
                 }
 
+                _ => {}
+            }
+        }
+
+        // ── Manual list ──────────────────────────────────────────────────
+        Mode::ManualList { cursor } => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => {
+                    state.mode = Mode::Normal;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if cursor > 0 {
+                        state.mode = Mode::ManualList { cursor: cursor - 1 };
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if cursor + 1 < ui::render::MANUALS.len() {
+                        state.mode = Mode::ManualList { cursor: cursor + 1 };
+                    }
+                }
+                KeyCode::Enter => {
+                    state.mode = Mode::ManualView { index: cursor, scroll: 0 };
+                }
+                _ => {}
+            }
+        }
+
+        // ── Manual viewer ────────────────────────────────────────────────
+        Mode::ManualView { index, scroll } => {
+            let line_count = ui::render::manual_line_count(index);
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    state.mode = Mode::ManualList { cursor: index };
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if scroll > 0 {
+                        state.mode = Mode::ManualView { index, scroll: scroll - 1 };
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if scroll + 1 < line_count {
+                        state.mode = Mode::ManualView { index, scroll: scroll + 1 };
+                    }
+                }
                 _ => {}
             }
         }
