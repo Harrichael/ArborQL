@@ -5,6 +5,81 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+/// Which database backend to use for a connection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DbType {
+    Sqlite,
+    Mysql,
+}
+
+/// Parameters for a database connection (before it is actively connected).
+/// The actual `Box<dyn Database>` is created by calling `connect_params`.
+#[derive(Debug, Clone)]
+pub struct ConnectionParams {
+    /// User-defined name/alias for this connection.
+    pub name: String,
+    /// Which backend to use.
+    pub db_type: DbType,
+    /// SQLite: path to the `.db` file.
+    pub sqlite_path: Option<String>,
+    /// MySQL: hostname or IP address.
+    pub mysql_host: Option<String>,
+    /// MySQL: port number (default 3306).
+    pub mysql_port: Option<u16>,
+    /// MySQL: username.
+    pub mysql_username: Option<String>,
+    /// MySQL: password (may be empty).
+    pub mysql_password: Option<String>,
+    /// MySQL: database name.
+    pub mysql_database: Option<String>,
+}
+
+impl ConnectionParams {
+    /// Build the connection URL suitable for `connect()`.
+    pub fn to_url(&self) -> String {
+        match self.db_type {
+            DbType::Sqlite => {
+                let path = self.sqlite_path.as_deref().unwrap_or("");
+                format!("sqlite://{}", path)
+            }
+            DbType::Mysql => {
+                let host = self.mysql_host.as_deref().unwrap_or("localhost");
+                let port = self.mysql_port.unwrap_or(3306);
+                let user = self.mysql_username.as_deref().unwrap_or("");
+                let password = self.mysql_password.as_deref().unwrap_or("");
+                let database = self.mysql_database.as_deref().unwrap_or("");
+                if password.is_empty() {
+                    format!("mysql://{}@{}:{}/{}", user, host, port, database)
+                } else {
+                    format!("mysql://{}:{}@{}:{}/{}", user, password, host, port, database)
+                }
+            }
+        }
+    }
+
+    /// A human-readable URL without the password.
+    pub fn display_url(&self) -> String {
+        match self.db_type {
+            DbType::Sqlite => {
+                let path = self.sqlite_path.as_deref().unwrap_or("");
+                format!("sqlite://{}", path)
+            }
+            DbType::Mysql => {
+                let host = self.mysql_host.as_deref().unwrap_or("localhost");
+                let port = self.mysql_port.unwrap_or(3306);
+                let user = self.mysql_username.as_deref().unwrap_or("");
+                let database = self.mysql_database.as_deref().unwrap_or("");
+                format!("mysql://{}@{}:{}/{}", user, host, port, database)
+            }
+        }
+    }
+}
+
+/// Connect to a database using a `ConnectionParams` struct.
+pub async fn connect_params(params: &ConnectionParams) -> Result<Box<dyn Database>> {
+    connect(&params.to_url()).await
+}
+
 /// A single cell value from the database.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {

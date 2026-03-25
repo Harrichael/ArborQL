@@ -52,6 +52,9 @@ pub struct Engine {
     pub schema: Schema,
     pub roots: Vec<DataNode>,
     pub rules: Vec<Rule>,
+    /// Connection name for each rule (parallel to `rules`).
+    /// `None` means "use the default/only connection".
+    pub rule_connections: Vec<Option<String>>,
 }
 
 impl Engine {
@@ -60,6 +63,7 @@ impl Engine {
             schema,
             roots: Vec::new(),
             rules: Vec::new(),
+            rule_connections: Vec::new(),
         }
     }
 
@@ -114,16 +118,21 @@ impl Engine {
     /// Execute a rule (dispatching to filter or relation).
     /// Returns `Ok(None)` for filter rules or relation rules with a single path.
     /// Returns `Ok(Some(paths))` when multiple paths exist and user must choose.
+    ///
+    /// `connection_name` is the name of the connection that owns the tables in
+    /// this rule; `None` means "use the default/primary connection".
     pub async fn execute_rule(
         &mut self,
         db: &dyn Database,
         rule: Rule,
+        connection_name: Option<String>,
     ) -> Result<Option<crate::schema::PathSearchResult>> {
         match &rule {
             Rule::Filter { table, conditions } => {
                 let table = table.clone();
                 let conditions = conditions.clone();
                 self.apply_filter_rule(db, &table, &conditions).await?;
+                self.rule_connections.push(connection_name);
                 self.rules.push(rule);
                 Ok(None)
             }
@@ -138,6 +147,7 @@ impl Engine {
                 if let Some(path) = resolved_path {
                     let path = path.clone();
                     self.apply_relation_rule(db, &path).await?;
+                    self.rule_connections.push(connection_name);
                     self.rules.push(rule);
                     return Ok(None);
                 }
@@ -156,6 +166,7 @@ impl Engine {
                             via.join(", ")
                         ));
                         self.apply_relation_rule(db, &path).await?;
+                        self.rule_connections.push(connection_name);
                         self.rules.push(rule);
                         return Ok(None);
                     } else {
@@ -194,6 +205,7 @@ impl Engine {
                         via: via.clone(),
                         resolved_path: Some(path),
                     };
+                    self.rule_connections.push(connection_name);
                     self.rules.push(stored);
                     Ok(None)
                 } else {
@@ -205,23 +217,84 @@ impl Engine {
                 let table = table.clone();
                 let conditions = conditions.clone();
                 self.apply_prune_rule(&table, &conditions);
+                self.rule_connections.push(connection_name);
                 self.rules.push(rule);
                 Ok(None)
             }
         }
     }
 
-    /// Re-execute all rules in order (used when rules are reordered).
+    /// Re-execute all rules in order against a single database (legacy / single-connection path).
     pub async fn reexecute_all(&mut self, db: &dyn Database) -> Result<()> {
         self.roots.clear();
         let rules = self.rules.clone();
+        let rule_connections = self.rule_connections.clone();
         // Replay against a clean rules buffer so execute_rule doesn't append
         // duplicates during re-execution.
         self.rules.clear();
-        for rule in rules {
-            self.execute_rule(db, rule).await?;
+        self.rule_connections.clear();
+        // Pair each rule with its connection name; fall back to None when the
+        // rule_connections vec is shorter (e.g. when rules were mutated directly
+        // in tests without going through the public API).
+        for (i, rule) in rules.into_iter().enumerate() {
+            let conn_name = rule_connections.get(i).cloned().flatten();
+            self.execute_rule(db, rule, conn_name).await?;
         }
         Ok(())
+    }
+
+    /// Re-execute all rules, routing each rule to the appropriate database.
+    ///
+    /// `connections` maps connection names to database handles.  Rules whose
+    /// stored connection name is `None` (or unknown) fall back to the first
+    /// entry in `connections`.
+    pub async fn reexecute_all_multi(
+        &mut self,
+        connections: &[(&str, &dyn Database)],
+    ) -> Result<()> {
+        self.roots.clear();
+        let rules = self.rules.clone();
+        let rule_connections = self.rule_connections.clone();
+        self.rules.clear();
+        self.rule_connections.clear();
+
+        for (i, rule) in rules.into_iter().enumerate() {
+            let conn_name = rule_connections.get(i).cloned().flatten();
+            let db = conn_name
+                .as_deref()
+                .and_then(|name| {
+                    connections
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, db)| *db)
+                })
+                .or_else(|| connections.first().map(|(_, db)| *db));
+
+            if let Some(db) = db {
+                self.execute_rule(db, rule, conn_name).await?;
+            } else {
+                crate::log::warn("Skipping rule: no active database connection".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a rule (and its associated connection entry) by index.
+    pub fn remove_rule(&mut self, idx: usize) {
+        if idx < self.rules.len() {
+            self.rules.remove(idx);
+        }
+        if idx < self.rule_connections.len() {
+            self.rule_connections.remove(idx);
+        }
+    }
+
+    /// Insert a rule (and its associated connection entry) at the given index.
+    pub fn insert_rule(&mut self, idx: usize, rule: Rule, connection_name: Option<String>) {
+        let idx = idx.min(self.rules.len());
+        self.rules.insert(idx, rule);
+        let conn_idx = idx.min(self.rule_connections.len());
+        self.rule_connections.insert(conn_idx, connection_name);
     }
 }
 
@@ -719,9 +792,9 @@ mod tests {
         let users_rule = rules::parse_rule("users").unwrap();
         let relation_rule = rules::parse_rule("users to products").unwrap();
 
-        engine.execute_rule(&db, users_rule.clone()).await.unwrap();
+        engine.execute_rule(&db, users_rule.clone(), None).await.unwrap();
         engine
-            .execute_rule(&db, relation_rule.clone())
+            .execute_rule(&db, relation_rule.clone(), None)
             .await
             .unwrap();
 
@@ -765,9 +838,9 @@ mod tests {
         let rule_departments_users = rules::parse_rule("departments to users").unwrap();
         let rule_users_products = rules::parse_rule("users to products").unwrap();
 
-        engine.execute_rule(&db, rule_departments).await.unwrap();
-        engine.execute_rule(&db, rule_departments_users).await.unwrap();
-        engine.execute_rule(&db, rule_users_products).await.unwrap();
+        engine.execute_rule(&db, rule_departments, None).await.unwrap();
+        engine.execute_rule(&db, rule_departments_users, None).await.unwrap();
+        engine.execute_rule(&db, rule_users_products, None).await.unwrap();
 
         let sig = tree_signature(&engine.roots);
         assert!(

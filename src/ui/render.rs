@@ -1,6 +1,6 @@
 use crate::engine::{flatten_tree, DataNode};
 use crate::rules::{completions_at, Completion};
-use crate::ui::app::{AppState, Mode, VirtualFkAddStep};
+use crate::ui::app::{AppState, ConnectionAddStep, Mode, VirtualFkAddStep};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -53,6 +53,8 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
         Mode::VirtualFkManager { .. } => render_virtual_fk_manager(f, state),
         Mode::VirtualFkAdd(_) => render_virtual_fk_add(f, state),
         Mode::LogViewer { .. } => render_log_viewer(f, state),
+        Mode::ConnectionManager { .. } => render_connection_manager(f, state),
+        Mode::ConnectionAdd(_) => render_connection_add(f, state),
         Mode::Error(msg) => {
             let msg = msg.clone();
             render_overlay_message(f, &format!("Error: {}", msg), Color::Red);
@@ -245,14 +247,19 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             matches!(e.level, crate::log::LogLevel::Warn | crate::log::LogLevel::Error)
         });
         let alert = if has_warn_or_error { " ⚠ " } else { "" };
+        let conn_hint = if state.connections.is_empty() {
+            " [no db — M to connect]"
+        } else {
+            ""
+        };
         let (title, display) = match &state.mode {
             Mode::Normal => (
                 " LatticeQL ",
-                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  'l' logs  'q' quit",
+                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  'M' connections  'l' logs  'q' quit",
             ),
             _ => (" LatticeQL ", ""),
         };
-        let full_title = format!("{}{}", alert, title);
+        let full_title = format!("{}{}{}", alert, title, conn_hint);
         let title_style = if has_warn_or_error {
             Style::default().fg(Color::Yellow)
         } else {
@@ -801,4 +808,226 @@ fn render_log_viewer(f: &mut Frame, state: &AppState) {
     *list_state.offset_mut() = offset;
 
     f.render_stateful_widget(list, area, &mut list_state);
+}
+
+// ---------------------------------------------------------------------------
+// Connection Manager overlay
+// ---------------------------------------------------------------------------
+
+fn render_connection_manager(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(72, 70, f.area());
+    f.render_widget(Clear, area);
+
+    let cursor = if let Mode::ConnectionManager { cursor } = state.mode { cursor } else { 0 };
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    // Scroll to keep cursor in view.
+    let offset = if cursor + 1 > inner_height {
+        cursor + 1 - inner_height
+    } else {
+        0
+    };
+
+    let items: Vec<ListItem> = if state.connections.is_empty() {
+        vec![ListItem::new("  (none — press 'a' to add a connection)")
+            .style(Style::default().fg(Color::DarkGray))]
+    } else {
+        state
+            .connections
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(inner_height)
+            .map(|(i, conn)| {
+                use crate::ui::app::ConnectionStatus;
+                let (status_str, status_color) = match &conn.status {
+                    ConnectionStatus::Connected => ("● connected".to_string(), Color::Green),
+                    ConnectionStatus::Disconnected => ("○ disconnected".to_string(), Color::DarkGray),
+                    ConnectionStatus::Error(_) => ("✗ error".to_string(), Color::Red),
+                };
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("  {:16}", conn.name),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" {:12} ", status_str),
+                        Style::default().fg(status_color),
+                    ),
+                    Span::styled(
+                        conn.display_url.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+                if i == cursor {
+                    ListItem::new(line).style(Style::default().bg(Color::Blue).fg(Color::White))
+                } else {
+                    ListItem::new(line)
+                }
+            })
+            .collect()
+    };
+
+    let list = List::new(items).block(
+        Block::default()
+            .title(" Connection Manager  (↑↓ navigate · a add · x disconnect · Esc close) ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(list, area);
+}
+
+// ---------------------------------------------------------------------------
+// Connection Add wizard overlay
+// ---------------------------------------------------------------------------
+
+fn render_connection_add(f: &mut Frame, state: &AppState) {
+    let area = centered_rect(60, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let step = if let Mode::ConnectionAdd(ref s) = state.mode {
+        s.clone()
+    } else {
+        return;
+    };
+
+    match step {
+        ConnectionAddStep::ChooseType { cursor } => {
+            let inner_area = area;
+            let options = ["  SQLite  (local file)", "  MySQL   (host / port / user / pass / db)"];
+            let items: Vec<ListItem> = options
+                .iter()
+                .enumerate()
+                .map(|(i, label)| {
+                    let item = ListItem::new(*label);
+                    if i == cursor {
+                        item.style(Style::default().bg(Color::Blue).fg(Color::White))
+                    } else {
+                        item
+                    }
+                })
+                .collect();
+            let list = List::new(items).block(
+                Block::default()
+                    .title(" New Connection — Choose Type  (↑↓ navigate · Enter select · Esc back) ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            );
+            f.render_widget(list, inner_area);
+        }
+        // Text-input steps share a common layout.
+        _ => {
+            let (title, label, value, hint) = wizard_step_meta(&step);
+            render_wizard_text_input(f, area, title, label, value, hint);
+        }
+    }
+}
+
+/// Return (title, field_label, current_value, hint) for a text-input wizard step.
+fn wizard_step_meta(step: &ConnectionAddStep) -> (&'static str, &'static str, &str, &'static str) {
+    match step {
+        ConnectionAddStep::EnterSqlitePath { input } => (
+            " New SQLite Connection — File Path ",
+            "Path to .db file:",
+            input,
+            "Enter the path to your SQLite database file (e.g. samples/ecommerce.db)",
+        ),
+        ConnectionAddStep::EnterSqliteName { input, .. } => (
+            " New SQLite Connection — Connection Name ",
+            "Connection name (alias):",
+            input,
+            "A short name to identify this connection (e.g. 'ecommerce')",
+        ),
+        ConnectionAddStep::EnterMysqlHost { input } => (
+            " New MySQL Connection — Host ",
+            "Host:",
+            input,
+            "Hostname or IP address of the MySQL server (e.g. localhost)",
+        ),
+        ConnectionAddStep::EnterMysqlPort { input, .. } => (
+            " New MySQL Connection — Port ",
+            "Port:",
+            input,
+            "MySQL port (default: 3306)",
+        ),
+        ConnectionAddStep::EnterMysqlUsername { input, .. } => (
+            " New MySQL Connection — Username ",
+            "Username:",
+            input,
+            "MySQL username",
+        ),
+        ConnectionAddStep::EnterMysqlPassword { input, .. } => (
+            " New MySQL Connection — Password ",
+            "Password (blank = none):",
+            input,
+            "MySQL password — leave blank if no password is required",
+        ),
+        ConnectionAddStep::EnterMysqlDatabase { input, .. } => (
+            " New MySQL Connection — Database ",
+            "Database name:",
+            input,
+            "Name of the MySQL database to connect to",
+        ),
+        ConnectionAddStep::EnterMysqlName { input, .. } => (
+            " New MySQL Connection — Connection Name ",
+            "Connection name (alias):",
+            input,
+            "A short name to identify this connection (e.g. 'prod')",
+        ),
+        ConnectionAddStep::ChooseType { .. } => ("", "", "", ""),
+    }
+}
+
+/// Render a single-field text-input dialog for wizard steps.
+fn render_wizard_text_input(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    label: &str,
+    value: &str,
+    hint: &str,
+) {
+    // Split area: title block + label + input + hint.
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // label
+            Constraint::Length(3), // text input
+            Constraint::Min(1),    // hint
+        ])
+        .margin(2)
+        .split(area);
+
+    let block = Block::default()
+        .title(format!("{}  (Enter to continue · Esc back) ", title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(block, area);
+
+    // Label
+    f.render_widget(
+        Paragraph::new(label).style(Style::default().fg(Color::Cyan)),
+        inner[0],
+    );
+
+    // Input field with cursor indicator
+    let input_display = format!("{}▌", value);
+    f.render_widget(
+        Paragraph::new(input_display)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::White)),
+            )
+            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        inner[1],
+    );
+
+    // Hint
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: true }),
+        inner[2],
+    );
 }

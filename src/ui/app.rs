@@ -1,6 +1,103 @@
+use crate::db::DbType;
 use crate::rules::Rule;
 use crate::schema::{TablePath, VirtualFkDef};
 use std::collections::HashMap;
+
+/// Status of a connection entry in the connection manager.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionStatus {
+    Connected,
+    Disconnected,
+    Error(String),
+}
+
+/// Metadata about a database connection for display in the connection manager.
+/// The actual `Box<dyn Database>` handle is kept in `main.rs`.
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    pub name: String,
+    pub db_type: DbType,
+    /// Human-readable URL (no password).
+    pub display_url: String,
+    pub status: ConnectionStatus,
+}
+
+/// Steps in the connection-add wizard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionAddStep {
+    /// Step 1: choose SQLite or MySQL (cursor 0 = SQLite, 1 = MySQL).
+    ChooseType { cursor: usize },
+    // ── SQLite flow ──────────────────────────────────────────────────────
+    /// Step 2a: enter the SQLite file path.
+    EnterSqlitePath { input: String },
+    /// Step 3a: enter an alias/name for the connection.
+    EnterSqliteName { path: String, input: String },
+    // ── MySQL flow ───────────────────────────────────────────────────────
+    /// Step 2b: enter the MySQL host.
+    EnterMysqlHost { input: String },
+    /// Step 3b: enter the MySQL port.
+    EnterMysqlPort { host: String, input: String },
+    /// Step 4b: enter the MySQL username.
+    EnterMysqlUsername { host: String, port: String, input: String },
+    /// Step 5b: enter the MySQL password (blank to skip).
+    EnterMysqlPassword {
+        host: String,
+        port: String,
+        username: String,
+        input: String,
+    },
+    /// Step 6b: enter the MySQL database name.
+    EnterMysqlDatabase {
+        host: String,
+        port: String,
+        username: String,
+        password: String,
+        input: String,
+    },
+    /// Step 7b: enter an alias/name for the connection.
+    EnterMysqlName {
+        host: String,
+        port: String,
+        username: String,
+        password: String,
+        database: String,
+        input: String,
+    },
+}
+
+impl ConnectionAddStep {
+    /// Return a shared reference to the current text input buffer, if this
+    /// step has one.
+    pub fn input(&self) -> Option<&str> {
+        match self {
+            ConnectionAddStep::ChooseType { .. } => None,
+            ConnectionAddStep::EnterSqlitePath { input } => Some(input),
+            ConnectionAddStep::EnterSqliteName { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlHost { input } => Some(input),
+            ConnectionAddStep::EnterMysqlPort { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlUsername { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlPassword { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlDatabase { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlName { input, .. } => Some(input),
+        }
+    }
+
+    /// Return a mutable reference to the current text input buffer, if this
+    /// step has one.
+    pub fn input_mut(&mut self) -> Option<&mut String> {
+        match self {
+            ConnectionAddStep::ChooseType { .. } => None,
+            ConnectionAddStep::EnterSqlitePath { input } => Some(input),
+            ConnectionAddStep::EnterSqliteName { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlHost { input } => Some(input),
+            ConnectionAddStep::EnterMysqlPort { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlUsername { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlPassword { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlDatabase { input, .. } => Some(input),
+            ConnectionAddStep::EnterMysqlName { input, .. } => Some(input),
+        }
+    }
+}
 
 /// State for the 5-step virtual FK creation wizard.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +155,10 @@ pub enum Mode {
     VirtualFkAdd(VirtualFkAddStep),
     /// User is viewing the internal log history.
     LogViewer { cursor: usize },
+    /// User is managing database connections.
+    ConnectionManager { cursor: usize },
+    /// User is stepping through the connection-add wizard.
+    ConnectionAdd(ConnectionAddStep),
 }
 
 /// Working item in column manager overlay.
@@ -122,6 +223,8 @@ pub struct AppState {
     pub overlay_search: String,
     /// Whether the search input is currently active (accepting keystrokes).
     pub overlay_search_active: bool,
+    /// Metadata for all known connections (handles live in main.rs).
+    pub connections: Vec<ConnectionInfo>,
 }
 
 impl AppState {
@@ -154,6 +257,7 @@ impl AppState {
             overlay_scroll: 0,
             overlay_search: String::new(),
             overlay_search_active: false,
+            connections: Vec::new(),
         }
     }
 
