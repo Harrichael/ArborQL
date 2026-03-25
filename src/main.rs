@@ -391,6 +391,16 @@ async fn handle_key(
                 KeyCode::Char('s') => {
                     state.show_schema = !state.show_schema;
                 }
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+R from Normal mode: jump straight into reverse command search.
+                    state.clear_input();
+                    state.history_cursor = None;
+                    state.mode = Mode::CommandSearch {
+                        query: String::new(),
+                        match_cursor: 0,
+                        saved_input: String::new(),
+                    };
+                }
                 KeyCode::Char('r') => {
                     if !engine.rules.is_empty() {
                         state.rules = engine.rules.clone();
