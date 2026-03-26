@@ -66,8 +66,10 @@ struct RawTableColumnsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawVirtualFk {
     from_table: String,
-    type_column: String,
-    type_value: String,
+    #[serde(default)]
+    type_column: Option<String>,
+    #[serde(default)]
+    type_value: Option<String>,
     id_column: String,
     to_table: String,
     to_column: String,
@@ -271,6 +273,7 @@ mod tests {
         assert_eq!(cfg.virtual_fks.len(), 1);
         assert_eq!(cfg.virtual_fks[0].from_table, "comments");
         assert_eq!(cfg.virtual_fks[0].to_table, "posts");
+        assert_eq!(cfg.virtual_fks[0].type_column, Some("commentable_type".to_string()));
     }
 
     #[test]
@@ -280,8 +283,8 @@ mod tests {
 
         let vfks = vec![crate::schema::VirtualFkDef {
             from_table: "comments".to_string(),
-            type_column: "commentable_type".to_string(),
-            type_value: "Post".to_string(),
+            type_column: Some("commentable_type".to_string()),
+            type_value: Some("Post".to_string()),
             id_column: "commentable_id".to_string(),
             to_table: "posts".to_string(),
             to_column: "id".to_string(),
@@ -298,6 +301,38 @@ mod tests {
 
         assert_eq!(cfg.virtual_fks.len(), 1);
         assert_eq!(cfg.virtual_fks[0].from_table, "comments");
+        assert_eq!(cfg.virtual_fks[0].type_column, Some("commentable_type".to_string()));
+    }
+
+    #[test]
+    fn save_and_reload_simple_virtual_fk() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join(".latticeql")).unwrap();
+
+        // A simple FK with no type discriminator
+        let vfks = vec![crate::schema::VirtualFkDef {
+            from_table: "orders".to_string(),
+            type_column: None,
+            type_value: None,
+            id_column: "customer_id".to_string(),
+            to_table: "customers".to_string(),
+            to_column: "id".to_string(),
+        }];
+
+        save_virtual_fks(&dir, &vfks).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+        let cfg = load_config(&dir).unwrap();
+        if let Some(old_home) = old_home {
+            std::env::set_var("HOME", old_home);
+        }
+
+        assert_eq!(cfg.virtual_fks.len(), 1);
+        assert_eq!(cfg.virtual_fks[0].from_table, "orders");
+        assert_eq!(cfg.virtual_fks[0].to_table, "customers");
+        assert!(cfg.virtual_fks[0].type_column.is_none());
+        assert!(cfg.virtual_fks[0].type_value.is_none());
     }
 
     #[test]

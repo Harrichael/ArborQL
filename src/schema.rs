@@ -2,17 +2,24 @@ use crate::db::{Database, TableInfo};
 use anyhow::Result;
 use std::collections::HashMap;
 
-/// A user-defined virtual foreign key for polymorphic (type/id) associations.
+/// A user-defined virtual foreign key.
+///
+/// Supports both simple direct foreign keys (no type discrimination) and
+/// polymorphic (Rails-style) associations where a discriminator column
+/// determines which target table the id column points to.
+///
 /// Stored in `Schema.virtual_fks` and treated natively alongside real FK edges
 /// during path finding and traversal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VirtualFkDef {
-    /// Table that owns the type+id columns (e.g. `"comments"`).
+    /// Table that owns the id column (e.g. `"comments"`).
     pub from_table: String,
-    /// Discriminator column (e.g. `"commentable_type"`).
-    pub type_column: String,
+    /// Optional discriminator column for polymorphic associations
+    /// (e.g. `"commentable_type"`). `None` for simple direct FKs.
+    pub type_column: Option<String>,
     /// Value the type column must hold for this FK (e.g. `"Post"`).
-    pub type_value: String,
+    /// Only meaningful when `type_column` is `Some`.
+    pub type_value: Option<String>,
     /// Column in `from_table` that holds the referenced PK (e.g. `"commentable_id"`).
     pub id_column: String,
     /// Target table (e.g. `"posts"`).
@@ -209,7 +216,9 @@ fn edges_from(schema: &Schema, table: &str) -> Vec<(String, PathStep)> {
                 from_column: vfk.id_column.clone(),
                 to_table: vfk.to_table.clone(),
                 to_column: vfk.to_column.clone(),
-                source_type_filter: Some((vfk.type_column.clone(), vfk.type_value.clone())),
+                source_type_filter: vfk.type_column.as_ref()
+                    .zip(vfk.type_value.as_ref())
+                    .map(|(col, val)| (col.clone(), val.clone())),
                 ..Default::default()
             }));
         }
@@ -218,13 +227,15 @@ fn edges_from(schema: &Schema, table: &str) -> Vec<(String, PathStep)> {
     // Reverse virtual FK edges
     for vfk in &schema.virtual_fks {
         if vfk.to_table == table {
-            let extra = format!("{} = '{}'", vfk.type_column, vfk.type_value.replace('\'', "''"));
+            let target_extra_where = vfk.type_column.as_ref()
+                .zip(vfk.type_value.as_ref())
+                .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
             edges.push((vfk.from_table.clone(), PathStep {
                 from_table: table.to_string(),
                 from_column: vfk.to_column.clone(),
                 to_table: vfk.from_table.clone(),
                 to_column: vfk.id_column.clone(),
-                target_extra_where: Some(extra),
+                target_extra_where,
                 ..Default::default()
             }));
         }

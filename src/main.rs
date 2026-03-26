@@ -19,7 +19,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use rules::Completion;
 use schema::Schema;
 use std::io;
-use ui::app::{AppState, ColumnManagerItem, Mode, VirtualFkAddStep};
+use ui::app::{AppState, ColumnManagerItem, Mode, VirtualFkField, VirtualFkForm};
 use schema::VirtualFkDef;
 
 /// LatticeQL — Navigate complex datasets from multiple sources intuitively.
@@ -843,7 +843,7 @@ async fn handle_key(
             let filtered: Vec<usize> = {
                 let q = state.overlay_search.to_lowercase();
                 state.virtual_fks.iter().enumerate()
-                    .filter(|(_, vfk)| q.is_empty() || vfk.from_table.to_lowercase().contains(&q) || vfk.to_table.to_lowercase().contains(&q) || vfk.type_value.to_lowercase().contains(&q))
+                    .filter(|(_, vfk)| q.is_empty() || vfk.from_table.to_lowercase().contains(&q) || vfk.to_table.to_lowercase().contains(&q) || vfk.type_value.as_deref().unwrap_or("").to_lowercase().contains(&q))
                     .map(|(i, _)| i)
                     .collect()
             };
@@ -856,7 +856,10 @@ async fn handle_key(
                     let max = filtered.len().saturating_sub(1);
                     if cursor < max { state.mode = Mode::VirtualFkManager { cursor: cursor + 1 }; }
                 }
-                KeyCode::Char('a') => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickFromTable { cursor: 0 }); }
+                KeyCode::Char('a') => {
+                    state.reset_overlay_search();
+                    state.mode = Mode::VirtualFkAdd(VirtualFkForm::new());
+                }
                 KeyCode::Char('d') | KeyCode::Char('x') if !state.overlay_search_active => {
                     if let Some(&orig_idx) = filtered.get(cursor) {
                         let removed = state.virtual_fks.remove(orig_idx);
@@ -903,9 +906,9 @@ async fn handle_key(
             }
         }
 
-        // ── Virtual FK creation wizard ───────────────────────────────────
-        Mode::VirtualFkAdd(ref step) => {
-            let step = step.clone();
+        // ── Virtual FK creation form ────────────────────────────────────
+        Mode::VirtualFkAdd(ref form_state) => {
+            let form = form_state.clone();
 
             // Helper macro: build filtered original-indices for a slice
             macro_rules! filtered_indices {
@@ -918,145 +921,244 @@ async fn handle_key(
                 }};
             }
 
-            // Navigation + special keys always fire first.
-            // Printable chars only feed search when search is active.
-            match (&step, key.code) {
-                // ── Up/Down: navigate filtered list ──────────────────────
-                (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+            // Build the dropdown items for the currently active field.
+            let dropdown_items: Vec<String> = match &form.active_field {
+                VirtualFkField::FromTable | VirtualFkField::ToTable => state.table_names.clone(),
+                VirtualFkField::IdColumn => {
+                    state.table_columns.get(&form.from_table).cloned().unwrap_or_default()
+                }
+                VirtualFkField::TypeColumn => {
+                    let mut cols = vec!["(none — simple FK)".to_string()];
+                    cols.extend(state.table_columns.get(&form.from_table).cloned().unwrap_or_default());
+                    cols
+                }
+                VirtualFkField::TypeValue => {
+                    if form.type_column.is_empty() {
+                        vec!["(no type_column set — skipping)".to_string()]
+                    } else {
+                        form.type_options.iter().map(|(v, c)| format!("{}  ({})", v, c)).collect()
+                    }
+                }
+                VirtualFkField::ToColumn => {
+                    state.table_columns.get(&form.to_table).cloned().unwrap_or_default()
+                }
+            };
+
+            match key.code {
+                // ── Tab: advance to next field ─────────────────────────
+                KeyCode::Tab => {
+                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                        let next = f.active_field.next(f.type_column.is_empty());
+                        f.active_field = next;
+                        f.cursor = 0;
+                    }
+                    state.overlay_search.clear();
+                    state.overlay_search_active = false;
+                    state.overlay_scroll = 0;
+                    // Pre-select "id" when switching to ToColumn
+                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                        if f.active_field == VirtualFkField::ToColumn {
+                            let to_cols = state.table_columns.get(&f.to_table).cloned().unwrap_or_default();
+                            f.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
+                        }
+                    }
+                    // Load type options when switching to TypeValue
+                    if let Mode::VirtualFkAdd(f) = &state.mode {
+                        if f.active_field == VirtualFkField::TypeValue && !f.type_column.is_empty() {
+                            let tc = f.type_column.clone();
+                            let ft = f.from_table.clone();
+                            let options = query_type_options(db, &ft, &tc).await;
+                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                                f.type_options = options;
+                            }
+                        }
+                    }
+                }
+
+                // ── Shift+Tab: go to previous field ───────────────────
+                KeyCode::BackTab => {
+                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                        let prev = f.active_field.prev(f.type_column.is_empty());
+                        f.active_field = prev;
+                        f.cursor = 0;
+                    }
+                    state.overlay_search.clear();
+                    state.overlay_search_active = false;
+                    state.overlay_scroll = 0;
+                    // Load type options when switching back to TypeValue
+                    if let Mode::VirtualFkAdd(f) = &state.mode {
+                        if f.active_field == VirtualFkField::TypeValue && !f.type_column.is_empty() {
+                            let tc = f.type_column.clone();
+                            let ft = f.from_table.clone();
+                            let options = query_type_options(db, &ft, &tc).await;
+                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                                f.type_options = options;
+                            }
+                        }
+                    }
+                }
+
+                // ── Up/Down: navigate the active dropdown ──────────────
+                KeyCode::Up | KeyCode::Char('k') if !state.overlay_search_active => {
                     let c = state.wizard_cursor();
                     if c > 0 { state.wizard_set_cursor(c - 1); }
                 }
-                (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                    let max = match &step {
-                        VirtualFkAddStep::PickFromTable { .. } => filtered_indices!(state.table_names).len(),
-                        VirtualFkAddStep::PickTypeColumn { from_table, .. } => filtered_indices!(state.table_columns.get(from_table).cloned().unwrap_or_default()).len(),
-                        VirtualFkAddStep::PickTypeValue { options, .. } => { let l: Vec<String> = options.iter().map(|(v,c)| format!("{}  ({})", v, c)).collect(); filtered_indices!(l).len() }
-                        VirtualFkAddStep::PickIdColumn { from_table, .. } => filtered_indices!(state.table_columns.get(from_table).cloned().unwrap_or_default()).len(),
-                        VirtualFkAddStep::PickToTable { .. } => filtered_indices!(state.table_names).len(),
-                        VirtualFkAddStep::PickToColumn { to_table, .. } => filtered_indices!(state.table_columns.get(to_table).cloned().unwrap_or_default()).len(),
-                    };
+                KeyCode::Down | KeyCode::Char('j') if !state.overlay_search_active => {
+                    let fi = filtered_indices!(dropdown_items);
                     let c = state.wizard_cursor();
-                    if c + 1 < max { state.wizard_set_cursor(c + 1); }
+                    if c + 1 < fi.len() { state.wizard_set_cursor(c + 1); }
                 }
 
-                // ── / : activate search input ─────────────────────────
-                (_, KeyCode::Char('/')) if !state.overlay_search_active => {
+                // ── / : activate search ───────────────────────────────
+                KeyCode::Char('/') if !state.overlay_search_active => {
                     state.overlay_search_active = true;
-                    // don't clear existing search
                 }
 
                 // ── Esc: 3-level exit ─────────────────────────────────
-                (_, KeyCode::Esc) => {
+                KeyCode::Esc => {
                     if state.overlay_search_active {
-                        // Level 1: stop typing, keep filter
                         state.overlay_search_active = false;
                     } else if !state.overlay_search.is_empty() {
-                        // Level 2: clear filter
                         state.overlay_search.clear();
                         state.overlay_scroll = 0;
                         state.wizard_set_cursor(0);
                     } else {
-                        // Level 3: go back one step
                         state.reset_overlay_search();
-                        match step {
-                            VirtualFkAddStep::PickFromTable { .. } => { state.mode = Mode::VirtualFkManager { cursor: 0 }; }
-                            VirtualFkAddStep::PickTypeColumn { .. } => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickFromTable { cursor: 0 }); }
-                            VirtualFkAddStep::PickTypeValue { from_table, type_column, .. } => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeColumn { from_table, cursor: 0 }); }
-                            VirtualFkAddStep::PickIdColumn { from_table, type_column, type_value, .. } => {
-                                let options = query_type_options(db, &from_table, &type_column).await;
-                                state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeValue { from_table, type_column, options, cursor: 0 });
+                        state.mode = Mode::VirtualFkManager { cursor: 0 };
+                    }
+                }
+
+                // ── Enter: confirm selection for active field ─────────
+                KeyCode::Enter if !state.overlay_search_active => {
+                    let fi = filtered_indices!(dropdown_items);
+                    if let Some(&orig) = fi.get(form.cursor) {
+                        if let Some(raw_value) = dropdown_items.get(orig) {
+                            let raw_value = raw_value.clone();
+                            state.reset_overlay_search();
+
+                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                                match &f.active_field {
+                                    VirtualFkField::FromTable => {
+                                        f.from_table = raw_value;
+                                        // Reset dependent fields when source table changes
+                                        f.id_column.clear();
+                                        f.type_column.clear();
+                                        f.type_value.clear();
+                                        f.active_field = VirtualFkField::IdColumn;
+                                        f.cursor = 0;
+                                    }
+                                    VirtualFkField::IdColumn => {
+                                        f.id_column = raw_value;
+                                        f.active_field = VirtualFkField::TypeColumn;
+                                        f.cursor = 0;
+                                    }
+                                    VirtualFkField::TypeColumn => {
+                                        if raw_value.starts_with("(none") {
+                                            f.type_column.clear();
+                                            f.type_value.clear();
+                                            // Skip TypeValue — jump straight to ToTable
+                                            f.active_field = VirtualFkField::ToTable;
+                                        } else {
+                                            f.type_column = raw_value;
+                                            f.active_field = VirtualFkField::TypeValue;
+                                        }
+                                        f.cursor = 0;
+                                    }
+                                    VirtualFkField::TypeValue => {
+                                        if !raw_value.starts_with("(no type_column") {
+                                            // Strip the "  (count)" suffix
+                                            let tv = raw_value
+                                                .split("  (")
+                                                .next()
+                                                .unwrap_or(&raw_value)
+                                                .to_string();
+                                            f.type_value = tv;
+                                        }
+                                        f.active_field = VirtualFkField::ToTable;
+                                        f.cursor = 0;
+                                    }
+                                    VirtualFkField::ToTable => {
+                                        f.to_table = raw_value;
+                                        f.to_column.clear();
+                                        // Pre-select "id" column if it exists
+                                        let to_cols = state.table_columns
+                                            .get(&f.to_table).cloned().unwrap_or_default();
+                                        f.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
+                                        f.active_field = VirtualFkField::ToColumn;
+                                    }
+                                    VirtualFkField::ToColumn => {
+                                        f.to_column = raw_value;
+                                        // Commit when all required fields are filled
+                                        if f.is_complete() {
+                                            let vfk = VirtualFkDef {
+                                                from_table: f.from_table.clone(),
+                                                type_column: if f.type_column.is_empty() { None } else { Some(f.type_column.clone()) },
+                                                type_value: if f.type_value.is_empty() { None } else { Some(f.type_value.clone()) },
+                                                id_column: f.id_column.clone(),
+                                                to_table: f.to_table.clone(),
+                                                to_column: f.to_column.clone(),
+                                            };
+                                            state.virtual_fks.push(vfk.clone());
+                                            engine.schema.virtual_fks.push(vfk);
+                                            state.reset_overlay_search();
+                                            state.mode = Mode::VirtualFkManager {
+                                                cursor: state.virtual_fks.len().saturating_sub(1),
+                                            };
+                                            return Ok(true);
+                                        }
+                                    }
+                                }
                             }
-                            VirtualFkAddStep::PickToTable { from_table, type_column, type_value, id_column, .. } => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickIdColumn { from_table, type_column, type_value, cursor: 0 }); }
-                            VirtualFkAddStep::PickToColumn { from_table, type_column, type_value, id_column, .. } => { state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToTable { from_table, type_column, type_value, id_column, cursor: 0 }); }
+
+                            // Load type options when switching to TypeValue
+                            if let Mode::VirtualFkAdd(f) = &state.mode {
+                                if f.active_field == VirtualFkField::TypeValue
+                                    && !f.type_column.is_empty()
+                                {
+                                    let tc = f.type_column.clone();
+                                    let ft = f.from_table.clone();
+                                    let options = query_type_options(db, &ft, &tc).await;
+                                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
+                                        f.type_options = options;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
 
-                // ── Enter: confirm selection ───────────────────────────
-                (VirtualFkAddStep::PickFromTable { cursor }, KeyCode::Enter) => {
-                    let cursor = *cursor;
-                    let fi = filtered_indices!(state.table_names);
-                    if let Some(&orig) = fi.get(cursor) {
-                        if let Some(t) = state.table_names.get(orig) {
-                            let t = t.clone(); state.reset_overlay_search();
-                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeColumn { from_table: t, cursor: 0 });
-                        }
-                    }
-                }
-                (VirtualFkAddStep::PickTypeColumn { from_table, cursor }, KeyCode::Enter) => {
-                    let cursor = *cursor; let from_table = from_table.clone();
-                    let cols = state.table_columns.get(&from_table).cloned().unwrap_or_default();
-                    let fi = filtered_indices!(cols);
-                    if let Some(&orig) = fi.get(cursor) {
-                        if let Some(col) = cols.get(orig) {
-                            let col = col.clone(); state.reset_overlay_search();
-                            let options = query_type_options(db, &from_table, &col).await;
-                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickTypeValue { from_table, type_column: col, options, cursor: 0 });
-                        }
-                    }
-                }
-                (VirtualFkAddStep::PickTypeValue { from_table, type_column, options, cursor }, KeyCode::Enter) => {
-                    let cursor = *cursor; let options = options.clone();
-                    let labels: Vec<String> = options.iter().map(|(v,c)| format!("{}  ({})", v, c)).collect();
-                    let fi = filtered_indices!(labels);
-                    if let Some(&orig) = fi.get(cursor) {
-                        if let Some((tv, _)) = options.get(orig) {
-                            let tv = tv.clone(); let ft = from_table.clone(); let tc = type_column.clone();
-                            state.reset_overlay_search();
-                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickIdColumn { from_table: ft, type_column: tc, type_value: tv, cursor: 0 });
-                        }
-                    }
-                }
-                (VirtualFkAddStep::PickIdColumn { from_table, type_column, type_value, cursor }, KeyCode::Enter) => {
-                    let cursor = *cursor; let from_table = from_table.clone(); let type_column = type_column.clone(); let type_value = type_value.clone();
-                    let cols = state.table_columns.get(&from_table).cloned().unwrap_or_default();
-                    let fi = filtered_indices!(cols);
-                    if let Some(&orig) = fi.get(cursor) {
-                        if let Some(col) = cols.get(orig) {
-                            let col = col.clone(); state.reset_overlay_search();
-                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToTable { from_table, type_column, type_value, id_column: col, cursor: 0 });
-                        }
-                    }
-                }
-                (VirtualFkAddStep::PickToTable { from_table, type_column, type_value, id_column, cursor }, KeyCode::Enter) => {
-                    let cursor = *cursor; let from_table = from_table.clone(); let type_column = type_column.clone(); let type_value = type_value.clone(); let id_column = id_column.clone();
-                    let fi = filtered_indices!(state.table_names);
-                    if let Some(&orig) = fi.get(cursor) {
-                        if let Some(to_table) = state.table_names.get(orig) {
-                            let to_table = to_table.clone();
-                            let to_cols = state.table_columns.get(&to_table).cloned().unwrap_or_default();
-                            let default = to_cols.iter().position(|c| c == "id").unwrap_or(0);
-                            state.reset_overlay_search();
-                            state.mode = Mode::VirtualFkAdd(VirtualFkAddStep::PickToColumn { from_table, type_column, type_value, id_column, to_table, cursor: default });
-                        }
-                    }
-                }
-                (VirtualFkAddStep::PickToColumn { from_table, type_column, type_value, id_column, to_table, cursor }, KeyCode::Enter) => {
-                    let cursor = *cursor; let to_table = to_table.clone();
-                    let to_cols = state.table_columns.get(&to_table).cloned().unwrap_or_default();
-                    let fi = filtered_indices!(to_cols);
-                    if let Some(&orig) = fi.get(cursor) {
-                        if let Some(to_col) = to_cols.get(orig) {
-                            let vfk = VirtualFkDef {
-                                from_table: from_table.clone(), type_column: type_column.clone(),
-                                type_value: type_value.clone(), id_column: id_column.clone(),
-                                to_table: to_table.clone(), to_column: to_col.clone(),
-                            };
-                            state.virtual_fks.push(vfk.clone());
-                            engine.schema.virtual_fks.push(vfk);
-                            state.reset_overlay_search();
-                            state.mode = Mode::VirtualFkManager { cursor: state.virtual_fks.len().saturating_sub(1) };
+                // ── Ctrl+S: commit + save when form is complete ────────
+                KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    if form.is_complete() {
+                        let vfk = VirtualFkDef {
+                            from_table: form.from_table.clone(),
+                            type_column: if form.type_column.is_empty() { None } else { Some(form.type_column.clone()) },
+                            type_value: if form.type_value.is_empty() { None } else { Some(form.type_value.clone()) },
+                            id_column: form.id_column.clone(),
+                            to_table: form.to_table.clone(),
+                            to_column: form.to_column.clone(),
+                        };
+                        state.virtual_fks.push(vfk.clone());
+                        engine.schema.virtual_fks.push(vfk);
+                        match config::save_virtual_fks(&std::env::current_dir()?, &state.virtual_fks) {
+                            Ok(path) => {
+                                state.reset_overlay_search();
+                                state.mode = Mode::Info(format!("Virtual FK saved to {}", path.display()));
+                            }
+                            Err(e) => {
+                                state.mode = Mode::Error(format!("Save failed: {}", e));
+                            }
                         }
                     }
                 }
 
-                // ── Search input: printable chars when active ─────────
-                (_, KeyCode::Backspace) if state.overlay_search_active => {
+                // ── Search input: printable chars when active ──────────
+                KeyCode::Backspace if state.overlay_search_active => {
                     state.overlay_search.pop();
                     state.overlay_scroll = 0;
                     state.wizard_set_cursor(0);
                 }
-                (_, KeyCode::Char(c)) if state.overlay_search_active => {
+                KeyCode::Char(c) if state.overlay_search_active => {
                     state.overlay_search.push(c);
                     state.overlay_scroll = 0;
                     state.wizard_set_cursor(0);

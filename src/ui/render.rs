@@ -1,6 +1,6 @@
 use crate::engine::{flatten_tree, DataNode};
 use crate::rules::{completions_at, Completion};
-use crate::ui::app::{AppState, Mode, VirtualFkAddStep};
+use crate::ui::app::{AppState, Mode, VirtualFkField, VirtualFkForm};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -558,7 +558,7 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
             q.is_empty()
                 || vfk.from_table.to_lowercase().contains(&q)
                 || vfk.to_table.to_lowercase().contains(&q)
-                || vfk.type_value.to_lowercase().contains(&q)
+                || vfk.type_value.as_deref().unwrap_or("").to_lowercase().contains(&q)
         })
         .collect();
 
@@ -583,12 +583,20 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
             .skip(offset)
             .take(inner_height)
             .map(|(fi, (_, vfk))| {
-                let text = format!(
-                    "  {}.{} = '{}' → {}.{}  (via {}.{})",
-                    vfk.from_table, vfk.type_column, vfk.type_value,
-                    vfk.to_table, vfk.to_column,
-                    vfk.from_table, vfk.id_column,
-                );
+                let text = if let (Some(tc), Some(tv)) = (&vfk.type_column, &vfk.type_value) {
+                    format!(
+                        "  {}.{} = '{}' → {}.{}  (via {}.{})",
+                        vfk.from_table, tc, tv,
+                        vfk.to_table, vfk.to_column,
+                        vfk.from_table, vfk.id_column,
+                    )
+                } else {
+                    format!(
+                        "  {}.{} → {}.{}",
+                        vfk.from_table, vfk.id_column,
+                        vfk.to_table, vfk.to_column,
+                    )
+                };
                 let item = ListItem::new(text);
                 if fi == cursor {
                     item.style(Style::default().bg(Color::Blue).fg(Color::White))
@@ -620,71 +628,161 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
 }
 
 fn render_virtual_fk_add(f: &mut Frame, state: &mut AppState) {
-    let area = centered_rect(60, 70, f.area());
+    let area = centered_rect(76, 88, f.area());
     f.render_widget(Clear, area);
 
-    let step = if let Mode::VirtualFkAdd(ref s) = state.mode { s.clone() } else { return };
+    let form = if let Mode::VirtualFkAdd(ref form) = state.mode { form.clone() } else { return };
 
-    match step {
-        VirtualFkAddStep::PickFromTable { cursor } => {
-            render_pick_list(f, state, &state.table_names.clone(), cursor, area, Block::default()
-                .title(" Step 1/5: Table that owns the type+id columns  (↑↓ · / search · Enter · Esc) ")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)));
-        }
-        VirtualFkAddStep::PickTypeColumn { from_table, cursor } => {
-            let cols = state.table_columns.get(&from_table).cloned().unwrap_or_default();
-            render_pick_list(f, state, &cols, cursor, area, Block::default()
-                .title(format!(
-                    " Step 2/5: Type discriminator column in '{}'  (↑↓ · / search · Enter · Esc) ",
-                    from_table
-                ))
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)));
-        }
-        VirtualFkAddStep::PickTypeValue { from_table, type_column, options, cursor } => {
-            let option_strings: Vec<String> = options
-                .iter()
-                .map(|(val, cnt)| format!("{}  ({})", val, cnt))
-                .collect();
-            render_pick_list(f, state, &option_strings, cursor, area, Block::default()
-                .title(format!(
-                    " Step 3/5: Select value of {}.{}  (↑↓ · / search · Enter · Esc) ",
-                    from_table, type_column
-                ))
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)));
-        }
-        VirtualFkAddStep::PickIdColumn { from_table, type_column, type_value, cursor } => {
-            let cols = state.table_columns.get(&from_table).cloned().unwrap_or_default();
-            render_pick_list(f, state, &cols, cursor, area, Block::default()
-                .title(format!(
-                    " Step 4/5: ID column in '{}' (holds FK when {}='{}')  (↑↓ · / search · Enter · Esc) ",
-                    from_table, type_column, type_value
-                ))
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)));
-        }
-        VirtualFkAddStep::PickToTable { type_column, type_value, id_column, cursor, .. } => {
-            render_pick_list(f, state, &state.table_names.clone(), cursor, area, Block::default()
-                .title(format!(
-                    " Step 5/6: Target table for {}='{}' via {}  (↑↓ · / search · Enter · Esc) ",
-                    type_column, type_value, id_column
-                ))
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)));
-        }
-        VirtualFkAddStep::PickToColumn { type_column, type_value, to_table, cursor, .. } => {
-            let to_cols = state.table_columns.get(&to_table).cloned().unwrap_or_default();
-            render_pick_list(f, state, &to_cols, cursor, area, Block::default()
-                .title(format!(
-                    " Step 6/6: Join column on '{}' for {}='{}'  (↑↓ · / search · Enter · Esc) ",
-                    to_table, type_column, type_value
-                ))
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)));
-        }
+    let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
+
+    // Outer block
+    let complete = form.is_complete();
+    let hint = if complete {
+        " Ctrl+S: save & commit  "
+    } else {
+        " Fill required fields then press Ctrl+S or Enter on to_column  "
+    };
+    let block = Block::default()
+        .title(format!(
+            " Add Virtual FK  (Tab/Shift+Tab: field · ↑↓/j/k: select · Enter: confirm · /: search · Esc: cancel){} ",
+            if complete { "· Ctrl+S: save " } else { "" }
+        ))
+        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Layout inside block: header (7 rows) + dropdown (remaining) [+ search (3)]
+    let header_height: u16 = 7;
+    let search_height: u16 = if has_search { 3 } else { 0 };
+    let dropdown_height = inner.height.saturating_sub(header_height + search_height);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Length(dropdown_height),
+            Constraint::Length(search_height),
+        ])
+        .split(inner);
+
+    let header_area = sections[0];
+    let dropdown_area = sections[1];
+    let search_area = sections[2];
+
+    // ── Header: show all 6 fields + values ──────────────────────────────
+    render_vfk_form_header(f, &form, header_area);
+
+    // ── Dropdown: pick-list for the active field ─────────────────────────
+    render_vfk_form_dropdown(f, state, &form, dropdown_area);
+
+    // ── Search bar ──────────────────────────────────────────────────────
+    if has_search {
+        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
     }
+}
+
+/// Render the 6-field summary header showing current values for every field.
+fn render_vfk_form_header(f: &mut Frame, form: &VirtualFkForm, area: Rect) {
+    let active_label_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(Color::White);
+    let set_value_style = Style::default().fg(Color::Green);
+    let active_value_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let unset_style = Style::default().fg(Color::DarkGray);
+    let optional_label_style = Style::default().fg(Color::Cyan);
+
+    let field_line = |field: &VirtualFkField, value: &str, optional: bool| -> Line<'static> {
+        let is_active = &form.active_field == field;
+        let cursor_str = if is_active { "▶ " } else { "  " };
+        let opt_tag = if optional { " (opt)" } else { "" };
+        let label_text = format!("{:<12}{}", field.label(), opt_tag);
+        let colon_val = if value.is_empty() {
+            if optional { "(optional)".to_string() } else { "(not set)".to_string() }
+        } else {
+            value.to_string()
+        };
+        let ls = if is_active {
+            active_label_style
+        } else if optional {
+            optional_label_style
+        } else {
+            label_style
+        };
+        let vs = if value.is_empty() {
+            unset_style
+        } else if is_active {
+            active_value_style
+        } else {
+            set_value_style
+        };
+        Line::from(vec![
+            Span::raw(cursor_str.to_string()),
+            Span::styled(format!("{}: ", label_text), ls),
+            Span::styled(colon_val, vs),
+        ])
+    };
+
+    let type_col_val = if form.type_column.is_empty() { "" } else { &form.type_column };
+    let type_val_val = if form.type_value.is_empty() { "" } else { &form.type_value };
+
+    let lines: Vec<Line> = vec![
+        field_line(&VirtualFkField::FromTable, &form.from_table, false),
+        field_line(&VirtualFkField::IdColumn, &form.id_column, false),
+        field_line(&VirtualFkField::TypeColumn, type_col_val, true),
+        field_line(&VirtualFkField::TypeValue, type_val_val, true),
+        field_line(&VirtualFkField::ToTable, &form.to_table, false),
+        field_line(&VirtualFkField::ToColumn, &form.to_column, false),
+    ];
+
+    // Separator line
+    let separator = Line::from(Span::styled(
+        "─".repeat(area.width as usize),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let mut all_lines = lines;
+    all_lines.push(separator);
+
+    f.render_widget(Paragraph::new(all_lines), area);
+}
+
+/// Render the dropdown list for the currently active field.
+fn render_vfk_form_dropdown(f: &mut Frame, state: &mut AppState, form: &VirtualFkForm, area: Rect) {
+    // Build the items for the active field
+    let items: Vec<String> = match &form.active_field {
+        VirtualFkField::FromTable | VirtualFkField::ToTable => state.table_names.clone(),
+        VirtualFkField::IdColumn => {
+            state.table_columns.get(&form.from_table).cloned().unwrap_or_default()
+        }
+        VirtualFkField::TypeColumn => {
+            let mut cols = vec!["(none — simple FK)".to_string()];
+            cols.extend(state.table_columns.get(&form.from_table).cloned().unwrap_or_default());
+            cols
+        }
+        VirtualFkField::TypeValue => {
+            if form.type_column.is_empty() {
+                vec!["(no type_column set — skipping)".to_string()]
+            } else {
+                form.type_options.iter().map(|(v, c)| format!("{}  ({})", v, c)).collect()
+            }
+        }
+        VirtualFkField::ToColumn => {
+            state.table_columns.get(&form.to_table).cloned().unwrap_or_default()
+        }
+    };
+
+    let field_label = form.active_field.label();
+    let is_optional = matches!(form.active_field, VirtualFkField::TypeColumn | VirtualFkField::TypeValue);
+    let opt_suffix = if is_optional { " (optional)" } else { "" };
+
+    let block = Block::default()
+        .title(format!(" {} {}", field_label, opt_suffix))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    render_pick_list(f, state, &items, form.cursor, area, block);
 }
 
 /// Render a scrollable pick list with search support.

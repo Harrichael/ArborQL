@@ -405,7 +405,9 @@ fn find_step(schema: &Schema, a: &str, b: &str) -> Option<crate::schema::PathSte
                 from_column: vfk.id_column.clone(),
                 to_table: b.to_string(),
                 to_column: vfk.to_column.clone(),
-                source_type_filter: Some((vfk.type_column.clone(), vfk.type_value.clone())),
+                source_type_filter: vfk.type_column.as_ref()
+                    .zip(vfk.type_value.as_ref())
+                    .map(|(col, val)| (col.clone(), val.clone())),
                 ..Default::default()
             });
         }
@@ -413,13 +415,15 @@ fn find_step(schema: &Schema, a: &str, b: &str) -> Option<crate::schema::PathSte
     // Reverse virtual FK: b owns the poly columns, a is the target
     for vfk in &schema.virtual_fks {
         if vfk.to_table == a && vfk.from_table == b {
-            let extra = format!("{} = '{}'", vfk.type_column, vfk.type_value.replace('\'', "''"));
+            let target_extra_where = vfk.type_column.as_ref()
+                .zip(vfk.type_value.as_ref())
+                .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
             return Some(PathStep {
                 from_table: a.to_string(),
                 from_column: vfk.to_column.clone(),
                 to_table: b.to_string(),
                 to_column: vfk.id_column.clone(),
-                target_extra_where: Some(extra),
+                target_extra_where,
                 ..Default::default()
             });
         }
