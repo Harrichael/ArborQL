@@ -1,4 +1,4 @@
-# LatticeQL
+# LatticeQL - 💠**QL**
 
 Navigate complex relational datasets intuitively in a unified terminal interface.
 
