@@ -229,10 +229,10 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_empty() {
-        let path = std::env::temp_dir().join("latticeql-nonexistent-history-file-xyz.txt");
-        // Make sure the file really doesn't exist.
-        let _ = std::fs::remove_file(&path);
-        let h = CommandHistory::load_from_file(&path, 10_000).unwrap();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("history.txt");
+        // No need to remove_file; it's a fresh directory!
+        let h = CommandHistory::load_from_file(&file_path, 10_000).expect("Should not crash");
         assert!(h.is_empty());
     }
 }
