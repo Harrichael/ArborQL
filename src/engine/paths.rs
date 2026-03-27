@@ -99,6 +99,7 @@ pub fn find_paths(
     let mut path_buf = Vec::new();
 
     for depth in start_depth..=max_depth {
+        let mut depth_paths = Vec::new();
         dfs_at_depth(
             schema,
             from,
@@ -106,9 +107,13 @@ pub fn find_paths(
             &mut path_buf,
             &mut init_visited,
             depth,
-            via,
-            &mut results,
+            &mut depth_paths,
         );
+
+        if !via.is_empty() {
+            depth_paths.retain(|p| via_satisfied(p, via));
+        }
+        results.extend(depth_paths);
 
         if results.len() >= MAX_PATHS {
             return PathSearchResult {
@@ -138,15 +143,11 @@ fn dfs_at_depth(
     path_so_far: &mut Vec<PathStep>,
     visited: &mut std::collections::HashSet<String>,
     remaining_depth: usize,
-    via: &[String],
     results: &mut Vec<TablePath>,
 ) {
     if remaining_depth == 0 {
         if current == target {
-            let candidate = TablePath { steps: path_so_far.clone() };
-            if via_satisfied(&candidate, via) {
-                results.push(candidate);
-            }
+            results.push(TablePath { steps: path_so_far.clone() });
         }
         return;
     }
@@ -164,7 +165,6 @@ fn dfs_at_depth(
             path_so_far,
             visited,
             remaining_depth - 1,
-            via,
             results,
         );
         visited.remove(&next_table);
