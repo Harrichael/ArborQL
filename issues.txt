@@ -1,0 +1,23 @@
+## Connection Manager P2s
+
+1. Alias validation — prevent dots, spaces, and empty strings in connection aliases.
+   These break the `alias.table` qualified name syntax.
+
+2. Column completions broken for qualified names — `table_columns` is keyed by engine
+   names (e.g. `tickets`), so typing `:support.tickets where ` finds no column completions.
+   Need to add display-name keys to `table_columns`.
+
+3. `supports_uuid_functions()` wrong for mixed backends — returns true if ANY connection
+   supports it. With MySQL + SQLite, SQLite queries could try to use UUID functions.
+   Should be per-query based on which connection the query routes to.
+
+4. Rules break silently on disconnect — disconnecting a connection with active rules
+   causes errors on re-execute. Should warn the user or mark those rules as stale.
+
+5. Ctrl+S hint missing on Connections tab — bottom hint should mention "Ctrl+S: save"
+   for the selected row.
+
+6. Config save overwrites default.jsonnet — all save functions (virtual FKs, connections)
+   eval jsonnet then write back plain JSON, destroying any jsonnet-specific syntax
+   (variables, functions, imports, comments). Need a strategy for app-managed state
+   vs user-owned config.
