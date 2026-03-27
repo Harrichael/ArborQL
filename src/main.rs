@@ -1,5 +1,6 @@
 mod command_history;
 mod config;
+mod connection_manager;
 mod db;
 mod engine;
 mod log;
@@ -17,40 +18,47 @@ use crossterm::{
 use engine::{Engine, flatten_tree};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rules::Completion;
-use schema::Schema;
+
 use std::io;
-use ui::app::{AppState, ColumnManagerItem, Mode, VirtualFkField, VirtualFkForm};
+use connection_manager::{ConnectionManager, ConnectionType};
+use ui::app::{AppState, ColumnManagerItem, ConnectionForm, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
 use schema::VirtualFkDef;
 
 /// LatticeQL — Navigate complex datasets from multiple sources intuitively.
 #[derive(Parser, Debug)]
 #[command(name = "latticeql", version, about)]
 struct Args {
-    /// Database connection URL.
+    /// Database connection URL (optional — can also add via the connection manager).
     ///
     /// Examples:
     ///   sqlite://path/to/db.sqlite3
     ///   mysql://user:password@localhost/dbname
     #[arg(short, long)]
-    database: String,
+    database: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Connect to the database
-    eprintln!("Connecting to database…");
-    let db = db::connect(&args.database).await?;
+    let mut conn_mgr = ConnectionManager::new();
 
-    // Explore schema
-    eprintln!("Exploring schema…");
-    let schema = Schema::explore(db.as_ref()).await?;
+    // If a database URL was provided, add it as the first connection.
+    if let Some(ref url) = args.database {
+        let alias = ConnectionManager::alias_from_url(url);
+        let conn_type = ConnectionType::from_url(url)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported database URL: {}", url))?;
+        eprintln!("Connecting to database as '{}'…", alias);
+        conn_mgr.add_connection(alias, conn_type, url.clone()).await?;
+    }
+
+    let schema = conn_mgr.merged_schema().clone();
     let table_names = schema.table_names();
 
     let mut engine = Engine::new(schema);
     let mut state = AppState::new();
     state.table_names = table_names;
+    state.connections_summary = conn_mgr.connection_summaries();
     let defaults = config::load_config()?;
     state.default_visible_columns = defaults.columns.global;
     state.default_visible_columns_by_table = defaults.columns.per_table;
@@ -84,7 +92,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, &mut state, &mut engine, db.as_ref(), history_file).await;
+    let result = run_app(&mut terminal, &mut state, &mut engine, &mut conn_mgr, history_file).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -101,7 +109,7 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
     engine: &mut Engine,
-    db: &dyn db::Database,
+    conn_mgr: &mut ConnectionManager,
     history_file: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Pending paths waiting for user selection
@@ -141,7 +149,7 @@ async fn run_app(
                         key,
                         state,
                         engine,
-                        db,
+                        conn_mgr,
                         &mut pending_paths,
                         &history_file,
                     )
@@ -288,15 +296,42 @@ fn column_manager_items_for_table(
         .collect()
 }
 
+/// Refresh engine schema and UI state after a connection change.
+fn refresh_schema_from_conn_mgr(
+    state: &mut AppState,
+    engine: &mut Engine,
+    conn_mgr: &ConnectionManager,
+) {
+    let mut schema = conn_mgr.merged_schema().clone();
+    // Re-inject virtual FKs into the new schema.
+    for vfk in &state.virtual_fks {
+        schema.virtual_fks.push(vfk.clone());
+    }
+    engine.schema = schema;
+    state.table_names = engine.schema.table_names();
+    state.table_columns = engine
+        .schema
+        .tables
+        .iter()
+        .map(|(name, info)| {
+            let cols = info.columns.iter().map(|c| c.name.clone()).collect();
+            (name.clone(), cols)
+        })
+        .collect();
+    state.connections_summary = conn_mgr.connection_summaries();
+}
+
 /// Returns `false` when the application should quit.
 async fn handle_key(
     key: crossterm::event::KeyEvent,
     state: &mut AppState,
     engine: &mut Engine,
-    db: &dyn db::Database,
+    conn_mgr: &mut ConnectionManager,
     pending_paths: &mut Option<(rules::Rule, Vec<schema::TablePath>)>,
     history_file: &Option<std::path::PathBuf>,
 ) -> Result<bool> {
+    // The ConnectionManager implements Database, so we can use it as &dyn Database.
+    let db: &dyn db::Database = conn_mgr;
     // Column manager overlay has exclusive key handling while open.
     if state.column_add.is_some() {
         // Helper: get filtered indices for current search
@@ -484,6 +519,14 @@ async fn handle_key(
                 }
                 KeyCode::Char('m') => {
                     state.mode = Mode::ManualList { cursor: 0 };
+                }
+                KeyCode::Char('+') => {
+                    state.reset_overlay_search();
+                    state.connections_summary = conn_mgr.connection_summaries();
+                    state.mode = Mode::ConnectionManager {
+                        tab: ConnectionManagerTab::Connections,
+                        cursor: 0,
+                    };
                 }
                 _ => {}
             }
@@ -1176,6 +1219,154 @@ async fn handle_key(
                     state.wizard_set_cursor(0);
                 }
 
+                _ => {}
+            }
+        }
+
+        // ── Connection manager overlay ─────────────────────────────────
+        Mode::ConnectionManager { tab, cursor } => {
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::Normal;
+                }
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                    let new_tab = match tab {
+                        ConnectionManagerTab::Connections => ConnectionManagerTab::Connectors,
+                        ConnectionManagerTab::Connectors => ConnectionManagerTab::Connections,
+                    };
+                    state.mode = Mode::ConnectionManager { tab: new_tab, cursor: 0 };
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if cursor > 0 {
+                        state.mode = Mode::ConnectionManager { tab, cursor: cursor - 1 };
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = match &tab {
+                        ConnectionManagerTab::Connections => {
+                            state.connections_summary.len().saturating_sub(1)
+                        }
+                        ConnectionManagerTab::Connectors => {
+                            ConnectionType::all().len().saturating_sub(1)
+                        }
+                    };
+                    if cursor < max {
+                        state.mode = Mode::ConnectionManager { tab, cursor: cursor + 1 };
+                    }
+                }
+                KeyCode::Enter => {
+                    match &tab {
+                        ConnectionManagerTab::Connectors => {
+                            let types = ConnectionType::all();
+                            if cursor < types.len() {
+                                let ct = types[cursor].clone();
+                                state.mode = Mode::ConnectionAdd(ConnectionForm::new(ct));
+                            }
+                        }
+                        ConnectionManagerTab::Connections => {
+                            // Toggle connect/disconnect (also retries on Error)
+                            if cursor < conn_mgr.connections.len() {
+                                if conn_mgr.connections[cursor].is_connected() {
+                                    conn_mgr.disconnect(cursor);
+                                } else {
+                                    // Attempt reconnect; on failure the connection
+                                    // stays in Error state which is visible in the list.
+                                    let _ = conn_mgr.reconnect(cursor).await;
+                                }
+                                refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                                state.mode = Mode::ConnectionManager { tab, cursor };
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('x') => {
+                    if tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
+                        conn_mgr.remove_connection(cursor);
+                        refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                        let new_cursor = cursor.min(conn_mgr.connections.len().saturating_sub(1));
+                        state.mode = Mode::ConnectionManager { tab, cursor: new_cursor };
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Connection add form ─────────────────────────────────────────
+        Mode::ConnectionAdd(ref form_state) => {
+            let form = form_state.clone();
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::ConnectionManager {
+                        tab: ConnectionManagerTab::Connectors,
+                        cursor: 0,
+                    };
+                }
+                KeyCode::Tab => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        f.active_field = (f.active_field + 1) % f.fields.len();
+                    }
+                }
+                KeyCode::BackTab => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        if f.active_field == 0 {
+                            f.active_field = f.fields.len() - 1;
+                        } else {
+                            f.active_field -= 1;
+                        }
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('s')
+                    if key.code == KeyCode::Enter
+                        || key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    if form.is_complete() {
+                        let alias = form.alias().to_string();
+                        let conn_type = form.conn_type.clone();
+                        match conn_type.build_url(&form.values()) {
+                            Err(e) => {
+                                state.mode = Mode::Error(format!("Invalid params: {}", e));
+                            }
+                            Ok(url) => {
+                                // add_connection adds the connection regardless of
+                                // success/failure (Error state on failure).
+                                let result = conn_mgr.add_connection(alias.clone(), conn_type, url).await;
+                                refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                                let conn_idx = conn_mgr.connections.len().saturating_sub(1);
+                                match result {
+                                    Ok(()) => {
+                                        state.mode = Mode::Info(format!(
+                                            "Connected '{}' ({} tables)",
+                                            alias,
+                                            conn_mgr
+                                                .connections
+                                                .last()
+                                                .map(|c| c.original_tables.len())
+                                                .unwrap_or(0)
+                                        ));
+                                    }
+                                    Err(_) => {
+                                        // Connection was added in Error state;
+                                        // go to manager so user can see it and retry.
+                                        state.mode = Mode::ConnectionManager {
+                                            tab: ConnectionManagerTab::Connections,
+                                            cursor: conn_idx,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        f.fields[f.active_field].value.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        f.fields[f.active_field].value.push(c);
+                    }
+                }
                 _ => {}
             }
         }

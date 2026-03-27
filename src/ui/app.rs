@@ -1,4 +1,5 @@
 use crate::command_history::CommandHistory;
+use crate::connection_manager::ConnectionType;
 use crate::rules::Rule;
 use crate::schema::{TablePath, VirtualFkDef};
 use std::collections::HashMap;
@@ -149,6 +150,85 @@ pub enum Mode {
         /// Input buffer saved before entering search mode (restored on Esc).
         saved_input: String,
     },
+    /// User is browsing the connection manager.
+    ConnectionManager {
+        tab: ConnectionManagerTab,
+        cursor: usize,
+    },
+    /// User is filling the connection creation form.
+    ConnectionAdd(ConnectionForm),
+}
+
+/// Which tab is active in the connection manager.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionManagerTab {
+    /// List of active/disconnected connections.
+    Connections,
+    /// List of connector types (to start a wizard).
+    Connectors,
+}
+
+/// State for the connection creation form (single-screen, Tab-navigable fields).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionForm {
+    pub conn_type: ConnectionType,
+    pub fields: Vec<ConnectionFormField>,
+    pub active_field: usize,
+}
+
+impl ConnectionForm {
+    pub fn new(conn_type: ConnectionType) -> Self {
+        let defs = conn_type.fields();
+        let fields = defs
+            .into_iter()
+            .map(|d| ConnectionFormField {
+                name: d.name,
+                label: d.label,
+                value: String::new(),
+                placeholder: d.placeholder,
+                required: d.required,
+            })
+            .collect();
+        Self {
+            conn_type,
+            fields,
+            active_field: 0,
+        }
+    }
+
+    /// Returns true when all required fields have values.
+    pub fn is_complete(&self) -> bool {
+        self.fields
+            .iter()
+            .all(|f| !f.required || !f.value.is_empty())
+    }
+
+    /// Collect field values into a HashMap for URL building.
+    pub fn values(&self) -> std::collections::HashMap<String, String> {
+        self.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.value.clone()))
+            .collect()
+    }
+
+    /// Get the alias field value.
+    pub fn alias(&self) -> &str {
+        self.fields
+            .iter()
+            .find(|f| f.name == "alias")
+            .map(|f| f.value.as_str())
+            .unwrap_or("")
+    }
+}
+
+/// A single field in the connection creation form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionFormField {
+    pub name: String,
+    pub label: String,
+    pub value: String,
+    pub placeholder: String,
+    pub required: bool,
 }
 
 /// Working item in column manager overlay.
@@ -222,6 +302,8 @@ pub struct AppState {
     pub history_draft: String,
     /// Set to true by the key handler to request a Ctrl+Z terminal suspend.
     pub should_suspend: bool,
+    /// Connection summaries for the connection manager overlay.
+    pub connections_summary: Vec<crate::connection_manager::ConnectionSummary>,
 }
 
 impl AppState {
@@ -258,6 +340,7 @@ impl AppState {
             history_cursor: None,
             history_draft: String::new(),
             should_suspend: false,
+            connections_summary: Vec::new(),
         }
     }
 

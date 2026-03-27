@@ -1,6 +1,7 @@
+use crate::connection_manager::{ConnectionStatus, ConnectionType};
 use crate::engine::{flatten_tree, DataNode};
 use crate::rules::{completions_at, Completion};
-use crate::ui::app::{AppState, Mode, VirtualFkField, VirtualFkForm};
+use crate::ui::app::{AppState, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -69,6 +70,8 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
         Mode::LogViewer { .. } => render_log_viewer(f, state),
         Mode::ManualList { .. } => render_manual_list(f, state),
         Mode::ManualView { .. } => render_manual_view(f, state),
+        Mode::ConnectionManager { .. } => render_connection_manager(f, state),
+        Mode::ConnectionAdd(_) => render_connection_add(f, state),
         Mode::Error(msg) => {
             let msg = msg.clone();
             render_overlay_message(f, &format!("Error: {}", msg), Color::Red);
@@ -301,7 +304,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         let (title, display) = match &state.mode {
             Mode::Normal => (
                 " LatticeQL ",
-                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  'm' manuals  'l' logs  'q' quit",
+                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  '+' connections  'm' manuals  'l' logs  'q' quit",
             ),
             _ => (" LatticeQL ", ""),
         };
@@ -833,6 +836,274 @@ fn render_pick_list(
         let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
         render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
     }
+}
+
+fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
+    let (tab, cursor) = match &state.mode {
+        Mode::ConnectionManager { tab, cursor } => (tab.clone(), *cursor),
+        _ => return,
+    };
+
+    let area = centered_rect(70, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Connection Manager  (←→/Tab: switch tab · ↑↓: navigate · Enter: select · Esc: close) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Tab header (2 rows)
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(inner);
+
+    let tab_area = sections[0];
+    let list_area = sections[1];
+
+    // Render tab headers
+    let conn_style = if tab == ConnectionManagerTab::Connections {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let types_style = if tab == ConnectionManagerTab::Connectors {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let tab_line = Line::from(vec![
+        Span::styled("  [Connections]", conn_style),
+        Span::raw("    "),
+        Span::styled("[Connectors]", types_style),
+    ]);
+    f.render_widget(Paragraph::new(vec![tab_line, Line::from(Span::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(Color::DarkGray),
+    ))]), tab_area);
+
+    match tab {
+        ConnectionManagerTab::Connections => {
+            let summaries = &state.connections_summary;
+            if summaries.is_empty() {
+                let items = vec![ListItem::new("  (no connections — switch to Connectors tab to add one)")
+                    .style(Style::default().fg(Color::DarkGray))];
+                f.render_widget(List::new(items), list_area);
+            } else {
+                // Compute column widths for alignment.
+                let max_alias = summaries.iter().map(|s| s.alias.len()).max().unwrap_or(4).max(4);
+                let max_type = summaries.iter().map(|s| s.conn_type.len()).max().unwrap_or(4).max(4);
+                let avail_url = (list_area.width as usize)
+                    .saturating_sub(2 + 2 + max_alias + 2 + max_type + 2 + 14 + 12);
+
+                let items: Vec<ListItem> = summaries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let is_selected = i == cursor;
+
+                        let (status_str, status_color) = match &s.status {
+                            ConnectionStatus::Connected => ("●", Color::Green),
+                            ConnectionStatus::Disconnected => ("○", Color::Red),
+                            ConnectionStatus::Error(_) => ("✗", Color::Red),
+                        };
+
+                        let url_or_err = match &s.status {
+                            ConnectionStatus::Error(msg) => {
+                                if msg.len() > avail_url && avail_url > 3 {
+                                    format!("{}…", &msg[..avail_url - 1])
+                                } else {
+                                    msg.clone()
+                                }
+                            }
+                            _ => {
+                                let url = &s.url;
+                                if url.len() > avail_url && avail_url > 3 {
+                                    format!("{}…", &url[..avail_url - 1])
+                                } else {
+                                    url.clone()
+                                }
+                            }
+                        };
+
+                        let tables_str = if s.status.is_connected() {
+                            format!("{} tables", s.table_count)
+                        } else if s.last_table_count > 0 {
+                            let synced = s.last_synced
+                                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "unknown".into());
+                            format!("{} tables last synced {}", s.last_table_count, synced)
+                        } else {
+                            "—".to_string()
+                        };
+
+                        let bg = if is_selected { Color::Blue } else { Color::Reset };
+                        let fg_main = if is_selected { Color::White } else { Color::White };
+                        let fg_type = if is_selected { Color::Cyan } else { Color::Cyan };
+                        let fg_url = if matches!(&s.status, ConnectionStatus::Error(_)) {
+                            Color::Red
+                        } else if is_selected {
+                            Color::Gray
+                        } else {
+                            Color::DarkGray
+                        };
+                        let is_stale = !s.status.is_connected() && s.last_table_count > 0;
+                        let fg_tables = if is_stale {
+                            Color::DarkGray
+                        } else if is_selected {
+                            Color::Gray
+                        } else {
+                            Color::DarkGray
+                        };
+
+                        // Compute content width so we can pad the row to full width.
+                        let content_len = 2 + 1 + 1 + max_alias + 2 + max_type
+                            + 2 + url_or_err.len() + 2 + tables_str.len();
+                        let row_width = list_area.width.saturating_sub(2) as usize; // minus borders
+                        let pad = row_width.saturating_sub(content_len);
+
+                        let line = Line::from(vec![
+                            Span::styled("  ", Style::default().bg(bg)),
+                            Span::styled(status_str, Style::default().fg(status_color).bg(bg)),
+                            Span::styled(" ", Style::default().bg(bg)),
+                            Span::styled(
+                                format!("{:<width$}", s.alias, width = max_alias),
+                                Style::default().fg(fg_main).bg(bg),
+                            ),
+                            Span::styled("  ", Style::default().bg(bg)),
+                            Span::styled(
+                                format!("{:<width$}", s.conn_type, width = max_type),
+                                Style::default().fg(fg_type).bg(bg),
+                            ),
+                            Span::styled("  ", Style::default().bg(bg)),
+                            Span::styled(url_or_err, Style::default().fg(fg_url).bg(bg)),
+                            Span::styled("  ", Style::default().bg(bg)),
+                            Span::styled(
+                                format!("{}{}", tables_str, " ".repeat(pad)),
+                                Style::default().fg(fg_tables).bg(bg),
+                            ),
+                        ]);
+                        ListItem::new(line)
+                    })
+                    .collect();
+
+                let list = List::new(items).block(
+                    Block::default()
+                        .title_bottom(Line::from(Span::styled(
+                            " Enter: toggle connect/disconnect · d/x: remove ",
+                            Style::default().fg(Color::DarkGray),
+                        )))
+                );
+                f.render_widget(list, list_area);
+            }
+        }
+        ConnectionManagerTab::Connectors => {
+            let types = ConnectionType::all();
+            let items: Vec<ListItem> = types
+                .iter()
+                .enumerate()
+                .map(|(i, ct)| {
+                    let text = format!("  {} — create a new {} connection", ct.label(), ct.label());
+                    let item = ListItem::new(text);
+                    if i == cursor {
+                        item.style(Style::default().bg(Color::Blue).fg(Color::White))
+                    } else {
+                        item
+                    }
+                })
+                .collect();
+            let list = List::new(items).block(
+                Block::default()
+                    .title_bottom(Line::from(Span::styled(
+                        " Enter: start connection wizard ",
+                        Style::default().fg(Color::DarkGray),
+                    )))
+            );
+            f.render_widget(list, list_area);
+        }
+    }
+}
+
+fn render_connection_add(f: &mut Frame, state: &mut AppState) {
+    let form = match &state.mode {
+        Mode::ConnectionAdd(form) => form.clone(),
+        _ => return,
+    };
+
+    let area = centered_rect(60, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let complete = form.is_complete();
+    let hint = if complete {
+        " Enter/Ctrl+S: connect  "
+    } else {
+        " Fill required fields then press Enter  "
+    };
+
+    let block = Block::default()
+        .title(format!(
+            " New {} Connection  (Tab/Shift+Tab: field · Enter: connect · Esc: cancel) ",
+            form.conn_type.label()
+        ))
+        .title_bottom(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let active_label_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(Color::White);
+    let value_style = Style::default().fg(Color::Green);
+    let active_value_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let placeholder_style = Style::default().fg(Color::DarkGray);
+    let optional_label_style = Style::default().fg(Color::Cyan);
+
+    let lines: Vec<Line> = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let is_active = i == form.active_field;
+            let cursor_str = if is_active { "▶ " } else { "  " };
+            let req_tag = if !field.required { " (opt)" } else { "" };
+            let label_text = format!("{:<12}{}", field.label, req_tag);
+
+            let ls = if is_active {
+                active_label_style
+            } else if !field.required {
+                optional_label_style
+            } else {
+                label_style
+            };
+
+            let (display_val, vs) = if field.value.is_empty() {
+                (field.placeholder.clone(), placeholder_style)
+            } else if is_active {
+                // Show cursor indicator
+                (format!("{}▌", field.value), active_value_style)
+            } else {
+                // Mask password fields
+                let display = if field.name == "password" {
+                    "•".repeat(field.value.len())
+                } else {
+                    field.value.clone()
+                };
+                (display, value_style)
+            };
+
+            Line::from(vec![
+                Span::raw(cursor_str.to_string()),
+                Span::styled(format!("{}: ", label_text), ls),
+                Span::styled(display_val, vs),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Compute a centered rect that is `percent_x`% wide and `percent_y`% tall.
