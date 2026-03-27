@@ -109,69 +109,115 @@ impl std::fmt::Display for TablePath {
 #[derive(Debug, Clone)]
 pub struct PathSearchResult {
     pub paths: Vec<TablePath>,
-    /// True when the BFS found more than 10 paths and stopped early.
+    /// True when the search found more paths than returned and stopped early.
     pub has_more: bool,
+    /// Depth to resume from when `has_more` is true (next unexplored depth level).
+    pub next_depth: usize,
 }
 
-/// Find paths between `from` and `to` using BFS.
+/// Find paths between `from` and `to` using iterative deepening DFS.
 ///
-/// Returns at most 10 paths (shortest-hop first). If `via` is non-empty only
-/// paths that pass through ALL of those intermediate tables are returned.
-/// `has_more` is set when additional paths exist beyond the 10 returned.
-pub fn find_paths(schema: &Schema, from: &str, to: &str, via: &[String]) -> PathSearchResult {
+/// Searches depths `start_depth..=max_depth`, collecting paths shortest-first.
+/// Once 10 or more paths have been accumulated, the current depth level is
+/// finished and the search stops. If `via` is non-empty only paths that pass
+/// through ALL of those intermediate tables are returned.
+///
+/// `has_more` is set when `max_depth` has not been exhausted, and `next_depth`
+/// gives the depth to resume from in a subsequent call.
+pub fn find_paths(
+    schema: &Schema,
+    from: &str,
+    to: &str,
+    via: &[String],
+    start_depth: usize,
+    max_depth: usize,
+) -> PathSearchResult {
     const MAX_PATHS: usize = 10;
 
     if !schema.tables.contains_key(from) || !schema.tables.contains_key(to) {
-        return PathSearchResult { paths: vec![], has_more: false };
+        return PathSearchResult { paths: vec![], has_more: false, next_depth: max_depth + 1 };
     }
     if from == to {
         return PathSearchResult {
             paths: vec![TablePath { steps: vec![] }],
             has_more: false,
+            next_depth: max_depth + 1,
         };
     }
 
     let mut results: Vec<TablePath> = Vec::new();
-    let mut has_more = false;
-
-    // BFS queue: (current_table, steps_so_far, visited_set)
-    let mut queue: std::collections::VecDeque<(
-        String,
-        Vec<PathStep>,
-        std::collections::HashSet<String>,
-    )> = std::collections::VecDeque::new();
-
     let mut init_visited = std::collections::HashSet::new();
     init_visited.insert(from.to_string());
-    queue.push_back((from.to_string(), vec![], init_visited));
 
-    'bfs: while let Some((current, path, visited)) = queue.pop_front() {
-        for (next_table, step) in edges_from(schema, &current) {
-            if visited.contains(&next_table) {
-                continue;
-            }
-            let mut new_path = path.clone();
-            new_path.push(step);
+    for depth in start_depth..=max_depth {
+        dfs_at_depth(
+            schema,
+            from,
+            to,
+            &[],
+            &init_visited,
+            depth,
+            via,
+            &mut results,
+        );
 
-            if next_table == to {
-                let candidate = TablePath { steps: new_path };
-                if via_satisfied(&candidate, via) {
-                    results.push(candidate);
-                    if results.len() > MAX_PATHS {
-                        has_more = true;
-                        results.pop();
-                        break 'bfs;
-                    }
-                }
-            } else {
-                let mut new_visited = visited.clone();
-                new_visited.insert(next_table.clone());
-                queue.push_back((next_table, new_path, new_visited));
-            }
+        if results.len() >= MAX_PATHS {
+            return PathSearchResult {
+                paths: results,
+                has_more: depth < max_depth,
+                next_depth: depth + 1,
+            };
         }
     }
 
-    PathSearchResult { paths: results, has_more }
+    PathSearchResult {
+        paths: results,
+        has_more: false,
+        next_depth: max_depth + 1,
+    }
+}
+
+/// Depth-limited DFS: find all paths of exactly `remaining_depth` steps from
+/// `current` to `target`, appending valid ones to `results`.
+fn dfs_at_depth(
+    schema: &Schema,
+    current: &str,
+    target: &str,
+    path_so_far: &[PathStep],
+    visited: &std::collections::HashSet<String>,
+    remaining_depth: usize,
+    via: &[String],
+    results: &mut Vec<TablePath>,
+) {
+    if remaining_depth == 0 {
+        if current == target {
+            let candidate = TablePath { steps: path_so_far.to_vec() };
+            if via_satisfied(&candidate, via) {
+                results.push(candidate);
+            }
+        }
+        return;
+    }
+
+    for (next_table, step) in edges_from(schema, current) {
+        if visited.contains(&next_table) {
+            continue;
+        }
+        let mut new_path = path_so_far.to_vec();
+        new_path.push(step);
+        let mut new_visited = visited.clone();
+        new_visited.insert(next_table.clone());
+        dfs_at_depth(
+            schema,
+            &next_table,
+            target,
+            &new_path,
+            &new_visited,
+            remaining_depth - 1,
+            via,
+            results,
+        );
+    }
 }
 
 /// Return all FK edges (forward, reverse, virtual) out of `table` as
@@ -294,7 +340,7 @@ mod tests {
             make_table("users", vec![("location_id", "locations", "id")]),
             make_table("locations", vec![]),
         ]);
-        let r = find_paths(&schema, "users", "locations", &[]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
         assert_eq!(r.paths.len(), 1);
         assert_eq!(r.paths[0].steps.len(), 1);
         assert_eq!(r.paths[0].steps[0].from_table, "users");
@@ -308,7 +354,7 @@ mod tests {
             make_table("user_groups", vec![("location_id", "locations", "id")]),
             make_table("locations", vec![]),
         ]);
-        let r = find_paths(&schema, "users", "locations", &[]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
         assert!(!r.paths.is_empty());
         let path = &r.paths[0];
         assert_eq!(path.steps.len(), 2);
@@ -320,14 +366,14 @@ mod tests {
             make_table("users", vec![]),
             make_table("locations", vec![]),
         ]);
-        let r = find_paths(&schema, "users", "locations", &[]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
         assert!(r.paths.is_empty());
     }
 
     #[test]
     fn test_same_table() {
         let schema = schema_from(vec![make_table("users", vec![])]);
-        let r = find_paths(&schema, "users", "users", &[]);
+        let r = find_paths(&schema, "users", "users", &[], 1, 10);
         assert_eq!(r.paths.len(), 1);
         assert!(r.paths[0].steps.is_empty());
     }
@@ -345,7 +391,7 @@ mod tests {
             make_table("assignments", vec![("location_id", "locations", "id")]),
             make_table("locations", vec![]),
         ]);
-        let r = find_paths(&schema, "users", "locations", &[]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
         assert!(r.paths.len() >= 2, "Expected multiple paths, got {}", r.paths.len());
     }
 }

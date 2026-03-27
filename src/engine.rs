@@ -166,7 +166,7 @@ impl Engine {
                     }
                 }
                 let result =
-                    crate::schema::find_paths(&self.schema, from_table, to_table, via);
+                    crate::schema::find_paths(&self.schema, from_table, to_table, via, 1, 10);
                 if result.paths.is_empty() {
                     // Log which tables have FKs to help the user understand the schema
                     let schema_fk_summary: Vec<String> = self.schema.tables.iter()

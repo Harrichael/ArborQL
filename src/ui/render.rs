@@ -402,16 +402,16 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
         })
         .collect();
 
-    if state.paths_has_more && items.len() < inner_height {
+    if state.paths_has_more {
         items.push(
-            ListItem::new("  … (more paths exist)")
-                .style(Style::default().fg(Color::DarkGray)),
+            ListItem::new("  … press 'n' to load more paths")
+                .style(Style::default().fg(Color::Yellow)),
         );
     }
 
     let list = List::new(items).block(
         Block::default()
-            .title(" Multiple paths found — choose one (↑↓ navigate, Enter select, Esc cancel) ")
+            .title(" Multiple paths found — ↑↓ navigate, Enter select, n more, Esc cancel ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Cyan)),
     );

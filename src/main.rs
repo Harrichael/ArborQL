@@ -736,6 +736,20 @@ async fn handle_key(
                         state.path_cursor += 1;
                     }
                 }
+                KeyCode::Char('n') if state.paths_has_more => {
+                    if let Some((ref rule, ref mut paths)) = pending_paths {
+                        if let rules::Rule::Relation { from_table, to_table, via, .. } = rule {
+                            let more = crate::schema::find_paths(
+                                &engine.schema, from_table, to_table, via,
+                                state.paths_next_depth, 10,
+                            );
+                            paths.extend(more.paths.iter().cloned());
+                            state.paths.extend(more.paths);
+                            state.paths_has_more = more.has_more;
+                            state.paths_next_depth = more.next_depth;
+                        }
+                    }
+                }
                 KeyCode::Enter => {
                     if let Some((rule, paths)) = pending_paths.take() {
                         let chosen = &paths[state.path_cursor];
@@ -1654,6 +1668,7 @@ async fn execute_command(
                     // Multiple paths — ask user to pick
                     state.paths = result.paths.clone();
                     state.paths_has_more = result.has_more;
+                    state.paths_next_depth = result.next_depth;
                     state.path_cursor = 0;
                     state.mode = Mode::PathSelection;
                     *pending_paths = Some((rule, result.paths));

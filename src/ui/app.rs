@@ -275,8 +275,10 @@ pub struct AppState {
     pub cursor: usize,
     /// Paths presented to the user for selection (PathSelection mode).
     pub paths: Vec<TablePath>,
-    /// True when BFS found more than 10 paths and truncated.
+    /// True when the search found more paths than returned.
     pub paths_has_more: bool,
+    /// Depth to resume pathfinding from when `paths_has_more` is true.
+    pub paths_next_depth: usize,
     /// Currently highlighted path index.
     pub path_cursor: usize,
     /// Table names from the schema, for display.
@@ -345,6 +347,7 @@ impl AppState {
             cursor: 0,
             paths: Vec::new(),
             paths_has_more: false,
+            paths_next_depth: 1,
             path_cursor: 0,
             table_names: Vec::new(),
             rules: Vec::new(),
