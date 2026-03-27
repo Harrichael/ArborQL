@@ -1,7 +1,9 @@
-use crate::db::{Database, Row};
+use crate::db::{Database, Row, Value};
 use crate::rules::{Rule, conditions_to_sql, row_matches_conditions};
-use crate::schema::{Schema, TablePath};
+use crate::schema::Schema;
+use super::paths::{TablePath, PathSearchResult, find_paths, build_path_from_via, MAX_PATH_DEPTH};
 use anyhow::Result;
+use std::collections::HashMap;
 
 /// A node in the hierarchical data tree.
 #[derive(Debug, Clone)]
@@ -93,8 +95,11 @@ impl Engine {
     ) {
         prune_nodes(&mut self.roots, table, conditions);
     }
-    /// the tree that belongs to `from_table`, follow the path and attach child
-    /// nodes (fetching any missing intermediate/target rows).
+    /// Follow the path and attach child nodes, batching SQL queries per step.
+    ///
+    /// For each step, collects FK values from all relevant frontier nodes,
+    /// issues a single `WHERE col IN (...)` query, then distributes results
+    /// back to the correct parent nodes.
     pub async fn apply_relation_rule(
         &mut self,
         db: &dyn Database,
@@ -104,9 +109,118 @@ impl Engine {
             return Ok(0);
         }
         let from_table = path.steps[0].from_table.clone();
+        let mut frontier = find_matching_addrs(&self.roots, &from_table);
         let mut total = 0;
-        for root in &mut self.roots {
-            total += attach_to_all_matching(db, root, &from_table, path).await?;
+
+        for (step_idx, step) in path.steps.iter().enumerate() {
+            // --- Collect phase (immutable) ---
+            // Gather (frontier_index, sql_literal) for each eligible node.
+            let mut fk_entries: Vec<(usize, String)> = Vec::new();
+            for (i, addr) in frontier.iter().enumerate() {
+                let node = node_at(&self.roots, addr);
+                // Polymorphic forward filter
+                if let Some((type_col, expected)) = &step.source_type_filter {
+                    if node.row.get(type_col).map(|v| v.to_string()).unwrap_or_default() != *expected {
+                        continue;
+                    }
+                }
+                // Null FK check
+                let fk_val = match node.row.get(&step.from_column) {
+                    Some(Value::Null) | None => {
+                        crate::log::info(format!(
+                            "Traversal step {}: skipping node in '{}' — FK column '{}' is null/missing",
+                            step_idx + 1, node.table, step.from_column
+                        ));
+                        continue;
+                    }
+                    Some(v) => v,
+                };
+                fk_entries.push((i, format_value_for_sql(fk_val)));
+            }
+
+            if fk_entries.is_empty() {
+                break;
+            }
+
+            // --- Query phase (chunked to avoid exceeding DB limits) ---
+            const CHUNK_SIZE: usize = 500;
+            let unique_fks: Vec<String> = fk_entries
+                .iter()
+                .map(|(_, v)| v.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+
+            let mut grouped: HashMap<Value, Vec<Row>> = HashMap::new();
+            let mut step_row_count = 0;
+
+            for chunk in unique_fks.chunks(CHUNK_SIZE) {
+                let in_clause = chunk.join(", ");
+                let sql = if let Some(extra) = &step.target_extra_where {
+                    format!(
+                        "SELECT * FROM {} WHERE {} IN ({}) AND {}",
+                        step.to_table, step.to_column, in_clause, extra
+                    )
+                } else {
+                    format!(
+                        "SELECT * FROM {} WHERE {} IN ({})",
+                        step.to_table, step.to_column, in_clause
+                    )
+                };
+                let rows = db.query(&sql).await?;
+                step_row_count += rows.len();
+                for row in rows {
+                    if let Some(key) = row.get(&step.to_column) {
+                        grouped.entry(key.clone()).or_default().push(row);
+                    }
+                }
+            }
+
+            total += step_row_count;
+            let chunks_used = (unique_fks.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            let id_summary = if unique_fks.len() <= 5 {
+                unique_fks.join(", ")
+            } else {
+                format!(
+                    "{}, ... +{} more",
+                    unique_fks[..3].join(", "),
+                    unique_fks.len() - 3
+                )
+            };
+            crate::log::info(format!(
+                "Traversal step {}/{}: {} → {} WHERE {} IN ({}) — {} ID(s), {} chunk(s), {} row(s)",
+                step_idx + 1,
+                path.steps.len(),
+                step.from_table,
+                step.to_table,
+                step.to_column,
+                id_summary,
+                unique_fks.len(),
+                chunks_used,
+                step_row_count,
+            ));
+
+            // --- Attach phase (mutable) ---
+            let mut next_frontier: Vec<NodeAddr> = Vec::new();
+            for &(addr_idx, _) in &fk_entries {
+                let addr = &frontier[addr_idx];
+                let node = node_at_mut(&mut self.roots, addr);
+                let fk_val = node.row.get(&step.from_column).unwrap();
+                let child_start = node.children.len();
+                if let Some(matching_rows) = grouped.get(fk_val) {
+                    for row in matching_rows {
+                        node.children
+                            .push(DataNode::new(step.to_table.clone(), row.clone()));
+                    }
+                }
+                for i in child_start..node.children.len() {
+                    let mut child_addr = addr.clone();
+                    child_addr.push(i);
+                    next_frontier.push(child_addr);
+                }
+            }
+
+            frontier = next_frontier;
         }
         Ok(total)
     }
@@ -118,7 +232,7 @@ impl Engine {
         &mut self,
         db: &dyn Database,
         rule: Rule,
-    ) -> Result<Option<crate::schema::PathSearchResult>> {
+    ) -> Result<Option<PathSearchResult>> {
         match &rule {
             Rule::Filter { table, conditions } => {
                 let table = table.clone();
@@ -160,13 +274,13 @@ impl Engine {
                         return Ok(None);
                     } else {
                         crate::log::warn(format!(
-                            "Traversal: could not build explicit path {} → {} via [{}] — no FK chain found; falling back to BFS",
+                            "Traversal: could not build explicit path {} → {} via [{}] — no FK chain found; falling back to path search",
                             from_table, to_table, via.join(", ")
                         ));
                     }
                 }
                 let result =
-                    crate::schema::find_paths(&self.schema, from_table, to_table, via);
+                    find_paths(&self.schema, from_table, to_table, via, 1, MAX_PATH_DEPTH);
                 if result.paths.is_empty() {
                     // Log which tables have FKs to help the user understand the schema
                     let schema_fk_summary: Vec<String> = self.schema.tables.iter()
@@ -238,197 +352,61 @@ fn prune_nodes(nodes: &mut Vec<DataNode>, table: &str, conditions: &[crate::rule
     });
 }
 
-/// Recursively attach path steps starting at `step_idx` to `node`, fetching
-/// children from the database and recursing into each child for the next step.
-/// Uses `Box::pin` to allow the async function to call itself recursively.
-fn attach_path_to_node<'a>(
-    db: &'a dyn Database,
-    node: &'a mut DataNode,
-    path: &'a TablePath,
-    step_idx: usize,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + 'a>> {
-    Box::pin(async move {
-        if step_idx >= path.steps.len() {
-            return Ok(0);
-        }
-        let step = &path.steps[step_idx];
+/// Index-based address of a node in the tree.
+/// `[0]` = `roots[0]`, `[0, 2]` = `roots[0].children[2]`, etc.
+type NodeAddr = Vec<usize>;
 
-        // Polymorphic forward filter: skip if type column doesn't match expected value
-        if let Some((type_col, expected)) = &step.source_type_filter {
-            let actual = node.row.get(type_col).map(|v| v.to_string()).unwrap_or_default();
-            if actual != *expected {
-                return Ok(0);
-            }
-        }
-
-        // Get the FK value from this node
-        let fk_val = match node.row.get(&step.from_column) {
-            Some(crate::db::Value::Null) | None => {
-                crate::log::info(format!(
-                    "Traversal step {}: skipping node in '{}' — FK column '{}' is null/missing",
-                    step_idx + 1, node.table, step.from_column
-                ));
-                return Ok(0);
-            }
-            Some(v) => v.clone(),
-        };
-
-        // Format FK value for SQL literal
-        let fk_sql_lit = match &fk_val {
-            crate::db::Value::Integer(i) => i.to_string(),
-            crate::db::Value::Float(f) => f.to_string(),
-            crate::db::Value::Bytes(b) => {
-                // Binary values (e.g. binary(16) UUIDs) must use MySQL hex literal X'...'
-                let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
-                format!("X'{}'", hex)
-            }
-            other => format!("'{}'", other.to_string().replace('\'', "''")),
-        };
-
-        // Build SQL, optionally with extra WHERE clause for reverse poly steps
-        let sql = if let Some(extra) = &step.target_extra_where {
-            format!(
-                "SELECT * FROM {} WHERE {} = {} AND {}",
-                step.to_table,
-                step.to_column,
-                fk_sql_lit,
-                extra
-            )
-        } else {
-            format!(
-                "SELECT * FROM {} WHERE {} = {}",
-                step.to_table,
-                step.to_column,
-                fk_sql_lit
-            )
-        };
-
-        let rows = db.query(&sql).await?;
-        let count = rows.len();
-        crate::log::info(format!(
-            "Traversal step {}/{}: {} — {} row(s) returned",
-            step_idx + 1, path.steps.len(), sql, count
-        ));
-        for row in rows {
-            let mut child = DataNode::new(step.to_table.clone(), row);
-            attach_path_to_node(db, &mut child, path, step_idx + 1).await?;
-            node.children.push(child);
-        }
-        Ok(count)
-    })
+/// Resolve an immutable node reference by address.
+fn node_at<'a>(roots: &'a [DataNode], addr: &NodeAddr) -> &'a DataNode {
+    let mut node = &roots[addr[0]];
+    for &idx in &addr[1..] {
+        node = &node.children[idx];
+    }
+    node
 }
 
-/// Walk `node` and all its descendants, calling `attach_path_to_node` for every
-/// node whose table matches `from_table`. Once a match is found, the path
-/// traversal handles descending into that subtree; we only recurse through
-/// non-matching nodes to search deeper.
-fn attach_to_all_matching<'a>(
-    db: &'a dyn Database,
-    node: &'a mut DataNode,
-    from_table: &'a str,
-    path: &'a TablePath,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize>> + 'a>> {
-    Box::pin(async move {
-        if node.table == from_table {
-            attach_path_to_node(db, node, path, 0).await
-        } else {
-            let mut total = 0;
-            for child in &mut node.children {
-                total += attach_to_all_matching(db, child, from_table, path).await?;
-            }
-            Ok(total)
-        }
-    })
+/// Resolve a mutable node reference by address.
+fn node_at_mut<'a>(roots: &'a mut [DataNode], addr: &NodeAddr) -> &'a mut DataNode {
+    let mut node = &mut roots[addr[0]];
+    for &idx in &addr[1..] {
+        node = &mut node.children[idx];
+    }
+    node
 }
 
-/// Build a `TablePath` from an explicit `via` list.
-fn build_path_from_via(
-    schema: &Schema,
-    from: &str,
-    to: &str,
-    via: &[String],
-) -> Option<TablePath> {
-    // via contains intermediate tables; full sequence is: from → via[0] → via[1] → ... → to
-    let sequence: Vec<&str> = std::iter::once(from)
-        .chain(via.iter().map(|s| s.as_str()))
-        .chain(std::iter::once(to))
-        .collect();
-
-    let mut steps = Vec::new();
-    for window in sequence.windows(2) {
-        let a = window[0];
-        let b = window[1];
-        // Find a FK between a and b
-        if let Some(step) = find_step(schema, a, b) {
-            steps.push(step);
-        } else {
-            return None;
-        }
+/// Walk the entire tree, collecting addresses of all nodes whose table matches.
+/// Always recurses into children (even for matching nodes) so that nested
+/// same-table nodes are found when rules are applied separately.
+fn find_matching_addrs(roots: &[DataNode], table: &str) -> Vec<NodeAddr> {
+    let mut addrs = Vec::new();
+    for (i, root) in roots.iter().enumerate() {
+        collect_addrs(root, table, &mut vec![i], &mut addrs);
     }
-    Some(TablePath { steps })
+    addrs
 }
 
-fn find_step(schema: &Schema, a: &str, b: &str) -> Option<crate::schema::PathStep> {
-    use crate::schema::PathStep;
-    if let Some(info) = schema.tables.get(a) {
-        for fk in &info.foreign_keys {
-            if fk.to_table == b {
-                return Some(PathStep {
-                    from_table: a.to_string(),
-                    from_column: fk.from_column.clone(),
-                    to_table: b.to_string(),
-                    to_column: fk.to_column.clone(),
-                    ..Default::default()
-                });
-            }
-        }
+fn collect_addrs(node: &DataNode, table: &str, addr: &mut Vec<usize>, out: &mut Vec<NodeAddr>) {
+    if node.table == table {
+        out.push(addr.clone());
     }
-    // Reverse direction
-    if let Some(info) = schema.tables.get(b) {
-        for fk in &info.foreign_keys {
-            if fk.to_table == a {
-                return Some(PathStep {
-                    from_table: a.to_string(),
-                    from_column: fk.to_column.clone(),
-                    to_table: b.to_string(),
-                    to_column: fk.from_column.clone(),
-                    ..Default::default()
-                });
-            }
-        }
+    for (i, child) in node.children.iter().enumerate() {
+        addr.push(i);
+        collect_addrs(child, table, addr, out);
+        addr.pop();
     }
-    // Forward virtual FK: a owns the poly columns, b is the target
-    for vfk in &schema.virtual_fks {
-        if vfk.from_table == a && vfk.to_table == b {
-            return Some(PathStep {
-                from_table: a.to_string(),
-                from_column: vfk.id_column.clone(),
-                to_table: b.to_string(),
-                to_column: vfk.to_column.clone(),
-                source_type_filter: vfk.type_column.as_ref()
-                    .zip(vfk.type_value.as_ref())
-                    .map(|(col, val)| (col.clone(), val.clone())),
-                ..Default::default()
-            });
+}
+
+/// Format a `Value` as a SQL literal for use in queries.
+fn format_value_for_sql(val: &Value) -> String {
+    match val {
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bytes(b) => {
+            let hex: String = b.iter().map(|byte| format!("{:02x}", byte)).collect();
+            format!("X'{}'", hex)
         }
+        other => format!("'{}'", other.to_string().replace('\'', "''")),
     }
-    // Reverse virtual FK: b owns the poly columns, a is the target
-    for vfk in &schema.virtual_fks {
-        if vfk.to_table == a && vfk.from_table == b {
-            let target_extra_where = vfk.type_column.as_ref()
-                .zip(vfk.type_value.as_ref())
-                .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
-            return Some(PathStep {
-                from_table: a.to_string(),
-                from_column: vfk.to_column.clone(),
-                to_table: b.to_string(),
-                to_column: vfk.id_column.clone(),
-                target_extra_where,
-                ..Default::default()
-            });
-        }
-    }
-    None
 }
 
 
@@ -467,9 +445,9 @@ pub fn available_extra_columns(node: &DataNode) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::paths::PathStep;
     use crate::db::Value;
     use crate::rules;
-    use crate::schema::PathStep;
 
     use std::collections::HashMap;
 
@@ -782,5 +760,158 @@ mod tests {
             sig.iter().any(|s| s.contains(":products#")),
             "users to products should reach users nested under departments"
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_paths_via_single_table() {
+        // Schema: users → orders → order_items → products
+        // Via ["orders"] should find paths that pass through orders.
+        let db = setup_test_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+
+        let via = vec!["orders".to_string()];
+        let r = find_paths(&schema, "users", "products", &via, 1, MAX_PATH_DEPTH);
+
+        assert!(!r.paths.is_empty(), "Should find at least one path via orders");
+        for p in &r.paths {
+            let tables: Vec<&str> = p.steps.iter().map(|s| s.from_table.as_str()).collect();
+            assert!(
+                tables.contains(&"orders"),
+                "Every path must pass through 'orders', got: {:?}", tables
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_find_paths_via_two_tables_order_sensitive() {
+        // Schema: users → orders → order_items → products
+        // The valid path traverses orders THEN order_items.
+        let db = setup_test_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+
+        // Correct order: ["orders", "order_items"] — matches the traversal
+        let via_correct = vec!["orders".to_string(), "order_items".to_string()];
+        let r_correct = find_paths(&schema, "users", "products", &via_correct, 1, MAX_PATH_DEPTH);
+        assert!(!r_correct.paths.is_empty(),
+            "Should find paths when via tables are in correct traversal order");
+
+        // Reversed order: ["order_items", "orders"] — does NOT match
+        let via_reversed = vec!["order_items".to_string(), "orders".to_string()];
+        let r_reversed = find_paths(&schema, "users", "products", &via_reversed, 1, MAX_PATH_DEPTH);
+        assert!(r_reversed.paths.is_empty(),
+            "Should find NO paths when via tables are in wrong order");
+    }
+
+    #[tokio::test]
+    async fn test_single_traversal_products_only_on_inner_users() {
+        // Single multi-step path: departments → users → products
+        // Products should attach to the inner users (children of departments),
+        // NOT to the top-level departments themselves.
+        let db = setup_departments_users_products_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+        let mut engine = Engine::new(schema);
+
+        // Load departments as roots
+        engine.apply_filter_rule(&db, "departments", &[]).await.unwrap();
+        assert_eq!(engine.roots.len(), 2);
+
+        // Apply 2-step path: departments → users → products
+        let path = crate::engine::paths::TablePath {
+            steps: vec![
+                crate::engine::paths::PathStep {
+                    from_table: "departments".to_string(),
+                    from_column: "id".to_string(),
+                    to_table: "users".to_string(),
+                    to_column: "department_id".to_string(),
+                    ..Default::default()
+                },
+                crate::engine::paths::PathStep {
+                    from_table: "users".to_string(),
+                    from_column: "favorite_product_id".to_string(),
+                    to_table: "products".to_string(),
+                    to_column: "id".to_string(),
+                    ..Default::default()
+                },
+            ],
+        };
+        engine.apply_relation_rule(&db, &path).await.unwrap();
+
+        // Departments should have user children
+        for dept in &engine.roots {
+            assert_eq!(dept.table, "departments");
+            assert!(!dept.children.is_empty(), "department should have user children");
+            for user in &dept.children {
+                assert_eq!(user.table, "users");
+                // Users should have product children
+                assert!(!user.children.is_empty(), "inner user should have product children");
+                assert_eq!(user.children[0].table, "products");
+            }
+            // No products as direct children of departments
+            assert!(
+                !dept.children.iter().any(|c| c.table == "products"),
+                "products should not be direct children of departments"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_split_traversals_products_on_all_users() {
+        // Two separate traversals:
+        // 1. departments to users (creates inner users under departments)
+        // 2. users to products (should attach products to ALL users — both
+        //    top-level and inner)
+        let db = setup_departments_users_products_db().await;
+        let schema = crate::schema::Schema::explore(&db).await.unwrap();
+        let mut engine = Engine::new(schema);
+
+        // Load both departments and users as roots
+        engine.apply_filter_rule(&db, "departments", &[]).await.unwrap();
+        engine.apply_filter_rule(&db, "users", &[]).await.unwrap();
+
+        // Step 1: departments → users
+        let dept_to_users = crate::engine::paths::TablePath {
+            steps: vec![crate::engine::paths::PathStep {
+                from_table: "departments".to_string(),
+                from_column: "id".to_string(),
+                to_table: "users".to_string(),
+                to_column: "department_id".to_string(),
+                ..Default::default()
+            }],
+        };
+        engine.apply_relation_rule(&db, &dept_to_users).await.unwrap();
+
+        // Step 2: users → products (should hit ALL users)
+        let users_to_products = crate::engine::paths::TablePath {
+            steps: vec![crate::engine::paths::PathStep {
+                from_table: "users".to_string(),
+                from_column: "favorite_product_id".to_string(),
+                to_table: "products".to_string(),
+                to_column: "id".to_string(),
+                ..Default::default()
+            }],
+        };
+        engine.apply_relation_rule(&db, &users_to_products).await.unwrap();
+
+        // Check inner users (under departments) got products
+        let dept_roots: Vec<&DataNode> = engine.roots.iter().filter(|r| r.table == "departments").collect();
+        for dept in &dept_roots {
+            for user in &dept.children {
+                assert_eq!(user.table, "users");
+                assert!(
+                    user.children.iter().any(|c| c.table == "products"),
+                    "inner user under department should have product children"
+                );
+            }
+        }
+
+        // Check top-level users also got products
+        let user_roots: Vec<&DataNode> = engine.roots.iter().filter(|r| r.table == "users").collect();
+        assert!(!user_roots.is_empty(), "should have top-level user roots");
+        for user in &user_roots {
+            assert!(
+                user.children.iter().any(|c| c.table == "products"),
+                "top-level user should also have product children"
+            );
+        }
     }
 }

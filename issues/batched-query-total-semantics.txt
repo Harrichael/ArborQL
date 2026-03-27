@@ -1,0 +1,20 @@
+P3: apply_relation_rule total return value semantics shifted
+============================================================
+
+After the batched query optimization, apply_relation_rule returns "rows
+fetched from DB" rather than "children created in tree."
+
+If two parent nodes share the same FK value (e.g., two orders with the
+same user_id), the old per-node code queried twice and counted rows
+twice. The new batched code queries once and counts once, but clones
+the results to both parents. The tree is correct; only the count differs.
+
+No caller currently depends on the return value for anything meaningful
+(tests check tree structure, not the count). But if someone adds logic
+based on this count, the semantics could be surprising.
+
+Fix if needed: count children actually attached (increment during the
+attach phase) rather than rows returned from DB.
+
+Relevant code: src/engine/core.rs, apply_relation_rule, the line
+`total += rows.len()`.

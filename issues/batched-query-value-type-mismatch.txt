@@ -1,0 +1,31 @@
+P2: Value type mismatch during batched query result grouping
+============================================================
+
+After batching SQL queries per step (WHERE col IN (...)), returned rows
+are grouped by their to_column Value and matched back to parent nodes by
+comparing against the parent's from_column Value using HashMap lookup.
+
+If the parent's FK value and the returned row's PK value are different
+Value variants for the same logical value (e.g., Integer(1) vs Text("1")),
+the HashMap lookup silently misses and no children are attached to that
+parent.
+
+Why this is P2 and not P1:
+- FK columns and their referenced PKs are the same type by contract
+- Both values come through the same DB backend row parser, so they
+  produce the same Value variant for the same column type
+- The old per-node code had the same implicit assumption (it let the DB
+  handle coercion in WHERE but never verified type matching)
+- No known real-world schema triggers this
+
+If it ever becomes an issue:
+- Add a fallback: if HashMap lookup misses, try coercing the FK value
+  to the target column's type (e.g., Integer → Text via to_string())
+  and retry the lookup
+- Or: group by the formatted SQL literal (String) instead of by Value,
+  since the SQL literal is what the query uses and what the DB matches
+  against. This trades HashMap<Value, _> for HashMap<String, _> and
+  sidesteps type mismatch entirely.
+
+Relevant code: src/engine/core.rs, apply_relation_rule, the "Group rows
+by their to_column value" section and the "Attach phase" HashMap::get.

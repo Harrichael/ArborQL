@@ -1,0 +1,612 @@
+use crate::schema::Schema;
+
+/// Hard limit on path search depth (longest path in FK hops).
+pub const MAX_PATH_DEPTH: usize = 10;
+
+/// One step in a relationship path (table A → table B via real or virtual FK).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PathStep {
+    /// Source table
+    pub from_table: String,
+    /// Column in the source table
+    pub from_column: String,
+    /// Target table
+    pub to_table: String,
+    /// Column in the target table
+    pub to_column: String,
+    /// For polymorphic forward steps: only follow this step when the source
+    /// node's named column equals the given value.
+    pub source_type_filter: Option<(String, String)>,
+    /// For polymorphic reverse steps: appended as `AND <str>` to the target query.
+    pub target_extra_where: Option<String>,
+}
+
+impl std::fmt::Display for PathStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{} → {}.{}",
+            self.from_table, self.from_column, self.to_table, self.to_column
+        )?;
+        if let Some((col, val)) = &self.source_type_filter {
+            write!(f, " [when {}.{} = '{}']", self.from_table, col, val)?;
+        }
+        if let Some(extra) = &self.target_extra_where {
+            write!(f, " [where {}]", extra)?;
+        }
+        Ok(())
+    }
+}
+
+/// An ordered sequence of steps describing a path between two tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TablePath {
+    pub steps: Vec<PathStep>,
+}
+
+impl std::fmt::Display for TablePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let parts: Vec<String> = std::iter::once(self.steps[0].from_table.clone())
+            .chain(self.steps.iter().map(|s| s.to_table.clone()))
+            .collect();
+        write!(f, "{}", parts.join(" → "))
+    }
+}
+
+/// Result of a path search — up to 10 paths plus a flag indicating more exist.
+#[derive(Debug, Clone)]
+pub struct PathSearchResult {
+    pub paths: Vec<TablePath>,
+    /// True when the search found more paths than returned and stopped early.
+    pub has_more: bool,
+    /// Depth to resume from when `has_more` is true (next unexplored depth level).
+    pub next_depth: usize,
+}
+
+/// Find paths between `from` and `to` using iterative deepening DFS.
+///
+/// Searches depths `start_depth..=max_depth`, collecting paths shortest-first.
+/// Once 10 or more paths have been accumulated, the current depth level is
+/// finished and the search stops. If `via` is non-empty only paths that pass
+/// through ALL of those intermediate tables are returned.
+///
+/// `has_more` is set when `max_depth` has not been exhausted, and `next_depth`
+/// gives the depth to resume from in a subsequent call.
+pub fn find_paths(
+    schema: &Schema,
+    from: &str,
+    to: &str,
+    via: &[String],
+    start_depth: usize,
+    max_depth: usize,
+) -> PathSearchResult {
+    const MAX_PATHS: usize = 10;
+
+    if !schema.tables.contains_key(from) || !schema.tables.contains_key(to) {
+        return PathSearchResult { paths: vec![], has_more: false, next_depth: max_depth + 1 };
+    }
+    if from == to {
+        return PathSearchResult {
+            paths: vec![TablePath { steps: vec![] }],
+            has_more: false,
+            next_depth: max_depth + 1,
+        };
+    }
+
+    let mut results: Vec<TablePath> = Vec::new();
+    let mut init_visited = std::collections::HashSet::new();
+    init_visited.insert(from.to_string());
+    let mut path_buf = Vec::new();
+
+    for depth in start_depth..=max_depth {
+        let mut depth_paths = Vec::new();
+        dfs_at_depth(
+            schema,
+            from,
+            to,
+            &mut path_buf,
+            &mut init_visited,
+            depth,
+            &mut depth_paths,
+        );
+
+        if !via.is_empty() {
+            depth_paths.retain(|p| via_satisfied(p, via));
+        }
+        results.extend(depth_paths);
+
+        if results.len() >= MAX_PATHS {
+            return PathSearchResult {
+                paths: results,
+                has_more: depth < max_depth,
+                next_depth: depth + 1,
+            };
+        }
+    }
+
+    PathSearchResult {
+        paths: results,
+        has_more: false,
+        next_depth: max_depth + 1,
+    }
+}
+
+/// Depth-limited DFS: find all paths of exactly `remaining_depth` steps from
+/// `current` to `target`, appending valid ones to `results`.
+///
+/// Uses push/pop on mutable `path_so_far` and `visited` to avoid cloning at
+/// every recursive call.
+fn dfs_at_depth(
+    schema: &Schema,
+    current: &str,
+    target: &str,
+    path_so_far: &mut Vec<PathStep>,
+    visited: &mut std::collections::HashSet<String>,
+    remaining_depth: usize,
+    results: &mut Vec<TablePath>,
+) {
+    if remaining_depth == 0 {
+        if current == target {
+            results.push(TablePath { steps: path_so_far.clone() });
+        }
+        return;
+    }
+
+    for (next_table, step) in edges_from(schema, current) {
+        if visited.contains(&next_table) {
+            continue;
+        }
+        path_so_far.push(step);
+        visited.insert(next_table.clone());
+        dfs_at_depth(
+            schema,
+            &next_table,
+            target,
+            path_so_far,
+            visited,
+            remaining_depth - 1,
+            results,
+        );
+        visited.remove(&next_table);
+        path_so_far.pop();
+    }
+}
+
+/// Extract the bare table name from a potentially qualified `"alias.table"` name.
+fn bare_table_name(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(pos) => &name[pos + 1..],
+        None => name,
+    }
+}
+
+/// Extract the alias prefix (including dot) from a qualified name, or `""` if bare.
+fn alias_prefix(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(pos) => &name[..pos + 1],
+        None => "",
+    }
+}
+
+/// Check if a VFK table name matches a schema table name.
+/// If the VFK name is already qualified (contains a dot), use exact match.
+/// Otherwise, compare against the bare portion of the schema name.
+fn vfk_table_matches(vfk_name: &str, schema_name: &str) -> bool {
+    if vfk_name.contains('.') {
+        vfk_name == schema_name
+    } else {
+        bare_table_name(schema_name) == vfk_name
+    }
+}
+
+/// Resolve a VFK target table name into the schema namespace, applying the same
+/// alias prefix as the source table. Returns `None` if the resolved target
+/// doesn't exist in the schema.
+fn resolve_vfk_target(schema: &Schema, vfk_target: &str, source_table: &str) -> Option<String> {
+    if vfk_target.contains('.') {
+        // Already qualified — use as-is if it exists
+        if schema.tables.contains_key(vfk_target) {
+            Some(vfk_target.to_string())
+        } else {
+            None
+        }
+    } else {
+        let prefix = alias_prefix(source_table);
+        let qualified = format!("{}{}", prefix, vfk_target);
+        if schema.tables.contains_key(&qualified) {
+            Some(qualified)
+        } else if schema.tables.contains_key(vfk_target) {
+            Some(vfk_target.to_string())
+        } else {
+            None
+        }
+    }
+}
+
+/// Return all FK edges (forward, reverse, virtual) out of `table` as
+/// `(next_table, step)` pairs.
+fn edges_from(schema: &Schema, table: &str) -> Vec<(String, PathStep)> {
+    let mut edges = Vec::new();
+
+    // Forward edges: this table's own FKs
+    if let Some(info) = schema.tables.get(table) {
+        for fk in &info.foreign_keys {
+            edges.push((fk.to_table.clone(), PathStep {
+                from_table: table.to_string(),
+                from_column: fk.from_column.clone(),
+                to_table: fk.to_table.clone(),
+                to_column: fk.to_column.clone(),
+                ..Default::default()
+            }));
+        }
+    }
+
+    // Reverse edges: other tables whose FK points here
+    for (other_table, other_info) in &schema.tables {
+        if other_table == table { continue; }
+        for fk in &other_info.foreign_keys {
+            if fk.to_table == table {
+                edges.push((other_table.clone(), PathStep {
+                    from_table: table.to_string(),
+                    from_column: fk.to_column.clone(),
+                    to_table: other_table.clone(),
+                    to_column: fk.from_column.clone(),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+
+    // Forward virtual FK edges
+    for vfk in &schema.virtual_fks {
+        if vfk_table_matches(&vfk.from_table, table) {
+            if let Some(target) = resolve_vfk_target(schema, &vfk.to_table, table) {
+                edges.push((target.clone(), PathStep {
+                    from_table: table.to_string(),
+                    from_column: vfk.id_column.clone(),
+                    to_table: target,
+                    to_column: vfk.to_column.clone(),
+                    source_type_filter: vfk.type_column.as_ref()
+                        .zip(vfk.type_value.as_ref())
+                        .map(|(col, val)| (col.clone(), val.clone())),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+
+    // Reverse virtual FK edges
+    for vfk in &schema.virtual_fks {
+        if vfk_table_matches(&vfk.to_table, table) {
+            if let Some(target) = resolve_vfk_target(schema, &vfk.from_table, table) {
+                let target_extra_where = vfk.type_column.as_ref()
+                    .zip(vfk.type_value.as_ref())
+                    .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
+                edges.push((target.clone(), PathStep {
+                    from_table: table.to_string(),
+                    from_column: vfk.to_column.clone(),
+                    to_table: target,
+                    to_column: vfk.id_column.clone(),
+                    target_extra_where,
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+
+    edges
+}
+
+/// Return true if `path` passes through all `via` tables as intermediate nodes.
+/// Return true if `path` passes through all `via` tables as intermediate nodes,
+/// in the order specified. This is a subsequence check: via[0] must appear
+/// before via[1], etc., but they need not be adjacent.
+fn via_satisfied(path: &TablePath, via: &[String]) -> bool {
+    if via.is_empty() {
+        return true;
+    }
+    let intermediates: Vec<&str> = path
+        .steps
+        .iter()
+        .skip(1)
+        .map(|s| s.from_table.as_str())
+        .collect();
+    let mut via_idx = 0;
+    for table in &intermediates {
+        if *table == via[via_idx] {
+            via_idx += 1;
+            if via_idx == via.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Build a `TablePath` from an explicit `via` list.
+pub fn build_path_from_via(
+    schema: &Schema,
+    from: &str,
+    to: &str,
+    via: &[String],
+) -> Option<TablePath> {
+    // via contains intermediate tables; full sequence is: from → via[0] → via[1] → ... → to
+    let sequence: Vec<&str> = std::iter::once(from)
+        .chain(via.iter().map(|s| s.as_str()))
+        .chain(std::iter::once(to))
+        .collect();
+
+    let mut steps = Vec::new();
+    for window in sequence.windows(2) {
+        let a = window[0];
+        let b = window[1];
+        // Find a FK between a and b
+        if let Some(step) = find_step(schema, a, b) {
+            steps.push(step);
+        } else {
+            return None;
+        }
+    }
+    Some(TablePath { steps })
+}
+
+fn find_step(schema: &Schema, a: &str, b: &str) -> Option<PathStep> {
+    if let Some(info) = schema.tables.get(a) {
+        for fk in &info.foreign_keys {
+            if fk.to_table == b {
+                return Some(PathStep {
+                    from_table: a.to_string(),
+                    from_column: fk.from_column.clone(),
+                    to_table: b.to_string(),
+                    to_column: fk.to_column.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    // Reverse direction
+    if let Some(info) = schema.tables.get(b) {
+        for fk in &info.foreign_keys {
+            if fk.to_table == a {
+                return Some(PathStep {
+                    from_table: a.to_string(),
+                    from_column: fk.to_column.clone(),
+                    to_table: b.to_string(),
+                    to_column: fk.from_column.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    // Forward virtual FK: a owns the poly columns, b is the target
+    for vfk in &schema.virtual_fks {
+        if vfk_table_matches(&vfk.from_table, a) && vfk_table_matches(&vfk.to_table, b) {
+            return Some(PathStep {
+                from_table: a.to_string(),
+                from_column: vfk.id_column.clone(),
+                to_table: b.to_string(),
+                to_column: vfk.to_column.clone(),
+                source_type_filter: vfk.type_column.as_ref()
+                    .zip(vfk.type_value.as_ref())
+                    .map(|(col, val)| (col.clone(), val.clone())),
+                ..Default::default()
+            });
+        }
+    }
+    // Reverse virtual FK: b owns the poly columns, a is the target
+    for vfk in &schema.virtual_fks {
+        if vfk_table_matches(&vfk.to_table, a) && vfk_table_matches(&vfk.from_table, b) {
+            let target_extra_where = vfk.type_column.as_ref()
+                .zip(vfk.type_value.as_ref())
+                .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
+            return Some(PathStep {
+                from_table: a.to_string(),
+                from_column: vfk.to_column.clone(),
+                to_table: b.to_string(),
+                to_column: vfk.id_column.clone(),
+                target_extra_where,
+                ..Default::default()
+            });
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{ColumnInfo, ForeignKey, TableInfo};
+
+    fn make_table(name: &str, fks: Vec<(&str, &str, &str)>) -> TableInfo {
+        TableInfo {
+            name: name.to_string(),
+            columns: vec![ColumnInfo {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                column_type: "INTEGER".to_string(),
+                nullable: false,
+                is_primary_key: true,
+            }],
+            foreign_keys: fks
+                .into_iter()
+                .map(|(fc, tt, tc)| ForeignKey {
+                    from_column: fc.to_string(),
+                    to_table: tt.to_string(),
+                    to_column: tc.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn schema_from(tables: Vec<TableInfo>) -> Schema {
+        let map = tables.into_iter().map(|t| (t.name.clone(), t)).collect();
+        Schema { tables: map, virtual_fks: Vec::new() }
+    }
+
+    #[test]
+    fn test_direct_path() {
+        let schema = schema_from(vec![
+            make_table("users", vec![("location_id", "locations", "id")]),
+            make_table("locations", vec![]),
+        ]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
+        assert_eq!(r.paths.len(), 1);
+        assert_eq!(r.paths[0].steps.len(), 1);
+        assert_eq!(r.paths[0].steps[0].from_table, "users");
+        assert_eq!(r.paths[0].steps[0].to_table, "locations");
+    }
+
+    #[test]
+    fn test_indirect_path() {
+        let schema = schema_from(vec![
+            make_table("users", vec![("group_id", "user_groups", "id")]),
+            make_table("user_groups", vec![("location_id", "locations", "id")]),
+            make_table("locations", vec![]),
+        ]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
+        assert!(!r.paths.is_empty());
+        let path = &r.paths[0];
+        assert_eq!(path.steps.len(), 2);
+    }
+
+    #[test]
+    fn test_no_path() {
+        let schema = schema_from(vec![
+            make_table("users", vec![]),
+            make_table("locations", vec![]),
+        ]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
+        assert!(r.paths.is_empty());
+    }
+
+    #[test]
+    fn test_same_table() {
+        let schema = schema_from(vec![make_table("users", vec![])]);
+        let r = find_paths(&schema, "users", "users", &[], 1, 10);
+        assert_eq!(r.paths.len(), 1);
+        assert!(r.paths[0].steps.is_empty());
+    }
+
+    #[test]
+    fn test_multiple_paths() {
+        let schema = schema_from(vec![
+            make_table(
+                "users",
+                vec![
+                    ("location_id", "locations", "id"),
+                    ("assignment_id", "assignments", "id"),
+                ],
+            ),
+            make_table("assignments", vec![("location_id", "locations", "id")]),
+            make_table("locations", vec![]),
+        ]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, 10);
+        assert!(r.paths.len() >= 2, "Expected multiple paths, got {}", r.paths.len());
+    }
+
+    #[test]
+    fn test_resumption() {
+        // Schema with paths at two different depths:
+        // - depth 2: hub → spoke_N → target (12 spokes)
+        // - depth 3: hub → spoke_N → bridge → target (12 more paths)
+        // First call (depth 1..=10) finds 0 at depth 1, then all 12 at
+        // depth 2 (>= MAX_PATHS=10), finishes depth 2, returns with
+        // has_more=true and next_depth=3.
+        // Resume call finds the depth-3 paths.
+        let mut tables = vec![
+            make_table("hub", (0..12).map(|i| {
+                let col: &str = Box::leak(format!("fk_{}", i).into_boxed_str());
+                let tbl: &str = Box::leak(format!("spoke_{}", i).into_boxed_str());
+                (col, tbl, "id")
+            }).collect()),
+            make_table("bridge", vec![("target_id", "target", "id")]),
+            make_table("target", vec![]),
+        ];
+        for i in 0..12 {
+            let name: &str = Box::leak(format!("spoke_{}", i).into_boxed_str());
+            tables.push(make_table(name, vec![
+                ("target_id", "target", "id"),
+                ("bridge_id", "bridge", "id"),
+            ]));
+        }
+        let schema = schema_from(tables);
+
+        // First call: searches all depths up to MAX_PATH_DEPTH
+        let r1 = find_paths(&schema, "hub", "target", &[], 1, MAX_PATH_DEPTH);
+        assert!(r1.paths.len() >= 10, "Expected >= 10 paths, got {}", r1.paths.len());
+        assert!(r1.has_more, "has_more should be true (depth-3 paths remain)");
+        assert_eq!(r1.next_depth, 3);
+        // All first-batch paths should be depth 2
+        for p in &r1.paths {
+            assert_eq!(p.steps.len(), 2, "First batch should all be depth-2 paths");
+        }
+
+        // Resume from next_depth
+        let r2 = find_paths(&schema, "hub", "target", &[], r1.next_depth, MAX_PATH_DEPTH);
+        assert!(!r2.paths.is_empty(), "Resumption should find depth-3 paths");
+        for p in &r2.paths {
+            assert!(p.steps.len() >= 3, "Resumed paths should be depth 3+");
+        }
+    }
+
+    #[test]
+    fn test_vfk_matches_aliased_schema_tables() {
+        // Schema with aliased table names (simulating multi-connection merge)
+        let mut schema = schema_from(vec![
+            make_table("int.comments", vec![]),
+            make_table("int.posts", vec![]),
+        ]);
+        // VFK with bare names (no alias)
+        schema.virtual_fks.push(crate::schema::VirtualFkDef {
+            from_table: "comments".to_string(),
+            type_column: Some("commentable_type".to_string()),
+            type_value: Some("Post".to_string()),
+            id_column: "commentable_id".to_string(),
+            to_table: "posts".to_string(),
+            to_column: "id".to_string(),
+        });
+
+        // edges_from should find forward VFK edge from int.comments → int.posts
+        let edges = edges_from(&schema, "int.comments");
+        let vfk_edges: Vec<_> = edges.iter()
+            .filter(|(_, step)| step.source_type_filter.is_some())
+            .collect();
+        assert_eq!(vfk_edges.len(), 1, "Should find one forward VFK edge");
+        assert_eq!(vfk_edges[0].0, "int.posts");
+        assert_eq!(vfk_edges[0].1.from_table, "int.comments");
+        assert_eq!(vfk_edges[0].1.to_table, "int.posts");
+
+        // edges_from should find reverse VFK edge from int.posts → int.comments
+        let reverse_edges = edges_from(&schema, "int.posts");
+        let rev_vfk_edges: Vec<_> = reverse_edges.iter()
+            .filter(|(_, step)| step.target_extra_where.is_some())
+            .collect();
+        assert_eq!(rev_vfk_edges.len(), 1, "Should find one reverse VFK edge");
+        assert_eq!(rev_vfk_edges[0].0, "int.comments");
+    }
+
+    #[test]
+    fn test_vfk_does_not_cross_aliases() {
+        // Schema with tables from two different aliases
+        let mut schema = schema_from(vec![
+            make_table("int.comments", vec![]),
+            make_table("stg.posts", vec![]),  // different alias!
+        ]);
+        schema.virtual_fks.push(crate::schema::VirtualFkDef {
+            from_table: "comments".to_string(),
+            type_column: None,
+            type_value: None,
+            id_column: "post_id".to_string(),
+            to_table: "posts".to_string(),
+            to_column: "id".to_string(),
+        });
+
+        // edges_from int.comments should NOT find an edge to stg.posts
+        let edges = edges_from(&schema, "int.comments");
+        let cross_alias: Vec<_> = edges.iter()
+            .filter(|(target, _)| target == "stg.posts")
+            .collect();
+        assert!(cross_alias.is_empty(),
+            "VFK should not produce cross-alias edges");
+    }
+}

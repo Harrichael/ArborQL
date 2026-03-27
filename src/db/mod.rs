@@ -15,6 +15,21 @@ pub enum Value {
     Bytes(Vec<u8>),
 }
 
+impl Eq for Value {}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::Integer(i) => i.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Text(s) => s.hash(state),
+            Value::Bytes(b) => b.hash(state),
+        }
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

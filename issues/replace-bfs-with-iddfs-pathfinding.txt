@@ -1,0 +1,33 @@
+P3 follow-ups for IDDFS pathfinding feature
+============================================
+
+1. has_more can be a false positive
+   If exactly 10 paths are found at depth 5, has_more is true because
+   depth < max_depth, but depths 6-10 might yield zero paths. The user
+   presses 'n', gets nothing, and the indicator disappears. Harmless but
+   slightly anticlimactic. Could track "did this depth actually find
+   anything" to be smarter, but probably not worth the complexity.
+
+2. Clear state.paths on Esc in PathSelection mode
+   In src/main.rs, the PathSelection key handler:
+   - Enter (line ~781): clears state.paths after selecting a path
+   - Esc (line ~726): sets mode to Normal and clears pending_paths,
+     but does NOT clear state.paths
+   Harmless since state.paths is only read when mode == PathSelection,
+   but asymmetric with Enter. Sub-items:
+   a. Add state.paths.clear() to the Esc branch
+   b. Also clear state.paths_has_more and state.paths_next_depth for
+      consistency — these are stale after exiting PathSelection
+   c. Consider extracting a helper like state.clear_path_selection()
+      that resets all path-related fields, called from both Enter and
+      Esc branches to avoid future divergence
+
+3. Add via_satisfied unit tests in engine/paths.rs
+   The via ordering logic is tested through SQLite integration tests in
+   engine/core.rs, but a direct unit test of via_satisfied with explicit
+   PathStep vectors would be faster to run and more precise about edge
+   cases:
+   - via table appears twice in a path
+   - via table equals from or to table
+   - single-step path with non-empty via (should always fail)
+   - via with a table not in the path at all

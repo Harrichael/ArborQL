@@ -363,7 +363,7 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
         0
     };
 
-    let mut items: Vec<ListItem> = state
+    let items: Vec<ListItem> = state
         .paths
         .iter()
         .enumerate()
@@ -402,19 +402,25 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
         })
         .collect();
 
-    if state.paths_has_more && items.len() < inner_height {
-        items.push(
-            ListItem::new("  … (more paths exist)")
-                .style(Style::default().fg(Color::DarkGray)),
+    let count_label = if state.paths_has_more {
+        format!(" {} paths (more available) ", state.paths.len())
+    } else {
+        format!(" {} paths ", state.paths.len())
+    };
+
+    let mut block = Block::default()
+        .title(" ↑↓ navigate, Enter select, Esc cancel ")
+        .title_bottom(Line::styled(count_label, Style::default().fg(Color::White)))
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::Cyan));
+
+    if state.paths_has_more {
+        block = block.title_bottom(
+            Line::styled(" n — load more ", Style::default().fg(Color::Yellow)),
         );
     }
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Multiple paths found — choose one (↑↓ navigate, Enter select, Esc cancel) ")
-            .borders(Borders::ALL)
-            .style(Style::default().fg(Color::Cyan)),
-    );
+    let list = List::new(items).block(block);
     f.render_widget(list, area);
 }
 

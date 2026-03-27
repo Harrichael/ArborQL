@@ -123,7 +123,7 @@ async fn run_app(
     history_file: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Pending paths waiting for user selection
-    let mut pending_paths: Option<(rules::Rule, Vec<schema::TablePath>)> = None;
+    let mut pending_paths: Option<(rules::Rule, Vec<engine::TablePath>)> = None;
 
     loop {
         // Drain any log entries queued by background code (e.g. type decoder warnings).
@@ -344,7 +344,7 @@ async fn handle_key(
     state: &mut AppState,
     engine: &mut Engine,
     conn_mgr: &mut ConnectionManager,
-    pending_paths: &mut Option<(rules::Rule, Vec<schema::TablePath>)>,
+    pending_paths: &mut Option<(rules::Rule, Vec<engine::TablePath>)>,
     history_file: &Option<std::path::PathBuf>,
 ) -> Result<bool> {
     // The ConnectionManager implements Database, so we can use it as &dyn Database.
@@ -734,6 +734,20 @@ async fn handle_key(
                 KeyCode::Down | KeyCode::Char('j') => {
                     if state.path_cursor + 1 < state.paths.len() {
                         state.path_cursor += 1;
+                    }
+                }
+                KeyCode::Char('n') if state.paths_has_more => {
+                    if let Some((ref rule, ref mut paths)) = *pending_paths {
+                        if let rules::Rule::Relation { from_table, to_table, via, .. } = rule {
+                            let more = crate::engine::find_paths(
+                                &engine.schema, from_table, to_table, via,
+                                state.paths_next_depth, engine::MAX_PATH_DEPTH,
+                            );
+                            paths.extend(more.paths.iter().cloned());
+                            state.paths.extend(more.paths);
+                            state.paths_has_more = more.has_more;
+                            state.paths_next_depth = more.next_depth;
+                        }
                     }
                 }
                 KeyCode::Enter => {
@@ -1634,7 +1648,7 @@ async fn execute_command(
     state: &mut AppState,
     engine: &mut Engine,
     db: &dyn db::Database,
-    pending_paths: &mut Option<(rules::Rule, Vec<schema::TablePath>)>,
+    pending_paths: &mut Option<(rules::Rule, Vec<engine::TablePath>)>,
 ) -> Result<()> {
     match rules::parse_rule(&cmd) {
         Err(e) => {
@@ -1654,6 +1668,7 @@ async fn execute_command(
                     // Multiple paths — ask user to pick
                     state.paths = result.paths.clone();
                     state.paths_has_more = result.has_more;
+                    state.paths_next_depth = result.next_depth;
                     state.path_cursor = 0;
                     state.mode = Mode::PathSelection;
                     *pending_paths = Some((rule, result.paths));

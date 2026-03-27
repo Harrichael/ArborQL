@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::schema::TablePath;
+use crate::engine::TablePath;
 
 /// A candidate for the next token at the current cursor position, used to drive
 /// real-time hints as the user types a command.

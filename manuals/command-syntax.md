@@ -64,11 +64,17 @@ users to locations via departments
 
 ### How It Works
 
-LatticeQL performs a BFS over the schema graph (real FKs + virtual FKs) to
-find all paths from `from_table` to `to_table`. If exactly one path exists,
-it is applied automatically. If multiple paths exist, a selection overlay
-appears so you can choose. The `via` keyword pins intermediate tables to
-disambiguate without the overlay.
+LatticeQL searches the schema graph (real FKs + virtual FKs) for paths from
+`from_table` to `to_table`, shortest first. If exactly one path exists, it is
+applied automatically. If multiple paths exist, a selection overlay appears so
+you can choose — press `n` in the overlay to load additional paths if more
+are available.
+
+The `via` keyword filters paths to only those that pass through the listed
+intermediate tables, **in the order specified**. For example,
+`users to products via orders, order_items` only matches paths that reach
+`orders` before `order_items`. The via tables need not be adjacent in the
+path — they are a subsequence constraint.
 
 Once applied, the engine queries the database and appends matching child rows
 to every existing node of `from_table` type in the tree.
