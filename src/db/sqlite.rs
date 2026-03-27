@@ -9,7 +9,11 @@ pub struct SqliteDb {
 
 impl SqliteDb {
     pub async fn connect(url: &str) -> Result<Self> {
-        let pool = SqlitePool::connect(url).await?;
+        let pool = sqlx::pool::PoolOptions::<sqlx::Sqlite>::new()
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .max_connections(5)
+            .connect(url)
+            .await?;
         Ok(Self { pool })
     }
 

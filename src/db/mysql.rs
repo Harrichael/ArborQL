@@ -13,7 +13,11 @@ pub struct MysqlDb {
 
 impl MysqlDb {
     pub async fn connect(url: &str) -> Result<Self> {
-        let pool = MySqlPool::connect(url).await?;
+        let pool = sqlx::pool::PoolOptions::<sqlx::MySql>::new()
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .max_connections(5)
+            .connect(url)
+            .await?;
         // Probe for UUID function support (available in MySQL 8.0+).
         let has_uuid_functions = sqlx::query(
             "SELECT BIN_TO_UUID(0x00000000000000000000000000000000)",

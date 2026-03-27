@@ -1,5 +1,6 @@
 mod command_history;
 mod config;
+mod connection_manager;
 mod db;
 mod engine;
 mod log;
@@ -17,41 +18,58 @@ use crossterm::{
 use engine::{Engine, flatten_tree};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rules::Completion;
-use schema::Schema;
+
 use std::io;
-use ui::app::{AppState, ColumnManagerItem, Mode, VirtualFkField, VirtualFkForm};
+use connection_manager::{ConnectionManager, ConnectionType};
+use ui::app::{AppState, ColumnManagerItem, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
 use schema::VirtualFkDef;
 
 /// LatticeQL — Navigate complex datasets from multiple sources intuitively.
 #[derive(Parser, Debug)]
 #[command(name = "latticeql", version, about)]
 struct Args {
-    /// Database connection URL.
+    /// Database connection URL (optional — can also add via the connection manager).
     ///
     /// Examples:
     ///   sqlite://path/to/db.sqlite3
     ///   mysql://user:password@localhost/dbname
     #[arg(short, long)]
-    database: String,
+    database: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Connect to the database
-    eprintln!("Connecting to database…");
-    let db = db::connect(&args.database).await?;
+    let mut conn_mgr = ConnectionManager::new();
 
-    // Explore schema
-    eprintln!("Exploring schema…");
-    let schema = Schema::explore(db.as_ref()).await?;
+    // Load config first so we can restore saved connections.
+    let defaults = config::load_config()?;
+
+    // If a database URL was provided, add it as the first connection.
+    if let Some(ref url) = args.database {
+        let alias = ConnectionManager::alias_from_url(url);
+        let conn_type = ConnectionType::from_url(url)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported database URL: {}", url))?;
+        eprintln!("Connecting to database as '{}'…", alias);
+        let params = ConnectionType::params_from_url(url);
+        conn_mgr.add_connection(None, alias, conn_type, url.clone(), params).await?;
+    }
+
+    // Saved connections from config are loaded into state.saved_connections
+    // (the Saved tab). They are NOT auto-connected — the user picks one and
+    // provides an alias via the Connection Manager.
+
+    let schema = conn_mgr.merged_schema().clone();
     let table_names = schema.table_names();
 
     let mut engine = Engine::new(schema);
     let mut state = AppState::new();
     state.table_names = table_names;
-    let defaults = config::load_config()?;
+    state.saved_connections = defaults.connections;
+    state.connections_summary = conn_mgr.connection_summaries(&saved_ids(&state));
+    state.display_table_names = conn_mgr.display_table_names();
+    state.display_name_map = conn_mgr.display_name_map();
     state.default_visible_columns = defaults.columns.global;
     state.default_visible_columns_by_table = defaults.columns.per_table;
     let history_max_len = defaults.history_max_len;
@@ -84,7 +102,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, &mut state, &mut engine, db.as_ref(), history_file).await;
+    let result = run_app(&mut terminal, &mut state, &mut engine, &mut conn_mgr, history_file).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -101,7 +119,7 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
     engine: &mut Engine,
-    db: &dyn db::Database,
+    conn_mgr: &mut ConnectionManager,
     history_file: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Pending paths waiting for user selection
@@ -141,7 +159,7 @@ async fn run_app(
                         key,
                         state,
                         engine,
-                        db,
+                        conn_mgr,
                         &mut pending_paths,
                         &history_file,
                     )
@@ -288,15 +306,56 @@ fn column_manager_items_for_table(
         .collect()
 }
 
+/// Compute the set of saved connection IDs for is_saved checks.
+fn saved_ids(state: &AppState) -> std::collections::HashSet<String> {
+    state.saved_connections.iter().map(|s| s.id.clone()).collect()
+}
+
+/// Refresh engine schema and UI state after a connection change.
+fn refresh_schema_from_conn_mgr(
+    state: &mut AppState,
+    engine: &mut Engine,
+    conn_mgr: &ConnectionManager,
+) {
+    let mut schema = conn_mgr.merged_schema().clone();
+    // Re-inject virtual FKs into the new schema.
+    for vfk in &state.virtual_fks {
+        schema.virtual_fks.push(vfk.clone());
+    }
+    engine.schema = schema;
+    state.table_names = engine.schema.table_names();
+    state.table_columns = engine
+        .schema
+        .tables
+        .iter()
+        .map(|(name, info)| {
+            let cols = info.columns.iter().map(|c| c.name.clone()).collect();
+            (name.clone(), cols)
+        })
+        .collect();
+    state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+    state.display_table_names = conn_mgr.display_table_names();
+    state.display_name_map = conn_mgr.display_name_map();
+}
+
 /// Returns `false` when the application should quit.
 async fn handle_key(
     key: crossterm::event::KeyEvent,
     state: &mut AppState,
     engine: &mut Engine,
-    db: &dyn db::Database,
+    conn_mgr: &mut ConnectionManager,
     pending_paths: &mut Option<(rules::Rule, Vec<schema::TablePath>)>,
     history_file: &Option<std::path::PathBuf>,
 ) -> Result<bool> {
+    // The ConnectionManager implements Database, so we can use it as &dyn Database.
+    let db: &dyn db::Database = conn_mgr;
+
+    // Ctrl+Z suspends regardless of current mode.
+    if key.code == KeyCode::Char('z') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        state.should_suspend = true;
+        return Ok(true);
+    }
+
     // Column manager overlay has exclusive key handling while open.
     if state.column_add.is_some() {
         // Helper: get filtered indices for current search
@@ -385,9 +444,6 @@ async fn handle_key(
         Mode::Normal => {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(false),
-                KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    state.should_suspend = true;
-                }
                 KeyCode::Char(':') => {
                     state.mode = Mode::Command;
                     state.clear_input();
@@ -485,6 +541,14 @@ async fn handle_key(
                 KeyCode::Char('m') => {
                     state.mode = Mode::ManualList { cursor: 0 };
                 }
+                KeyCode::Char('+') => {
+                    state.reset_overlay_search();
+                    state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+                    state.mode = Mode::ConnectionManager {
+                        tab: ConnectionManagerTab::Connections,
+                        cursor: 0,
+                    };
+                }
                 _ => {}
             }
         }
@@ -536,7 +600,7 @@ async fn handle_key(
                 KeyCode::Tab => {
                     let completions = rules::completions_at(
                         &state.input,
-                        &state.table_names,
+                        &state.completion_table_names(),
                         &state.table_columns,
                     );
                     if completions.len() == 1 {
@@ -555,7 +619,6 @@ async fn handle_key(
                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match c {
                         'c' => return Ok(false),
-                        'z' => state.should_suspend = true,
                         'r' => {
                             // Enter reverse-i-search mode.
                             let saved = state.input.clone();
@@ -622,7 +685,6 @@ async fn handle_key(
                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match c {
                         'c' => return Ok(false),
-                        'z' => state.should_suspend = true,
                         'r' => {
                             // Ctrl+R again: advance to the next older match.
                             state.mode = Mode::CommandSearch {
@@ -923,7 +985,7 @@ async fn handle_key(
 
             // Build the dropdown items for the currently active field.
             let dropdown_items: Vec<String> = match &form.active_field {
-                VirtualFkField::FromTable | VirtualFkField::ToTable => state.table_names.clone(),
+                VirtualFkField::FromTable | VirtualFkField::ToTable => state.display_table_names.clone(),
                 VirtualFkField::IdColumn => {
                     state.table_columns.get(&form.from_table).cloned().unwrap_or_default()
                 }
@@ -1176,6 +1238,327 @@ async fn handle_key(
                     state.wizard_set_cursor(0);
                 }
 
+                _ => {}
+            }
+        }
+
+        // ── Confirm dialog ──────────────────────────────────────────────
+        Mode::Confirm { tag, .. } => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    let save_pw = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+                    match tag {
+                        ConfirmAction::SaveConnectionWithPassword { conn_index } => {
+                            if conn_index < conn_mgr.connections.len() {
+                                let conn = &conn_mgr.connections[conn_index];
+                                let alias = conn.alias.clone();
+                                match config::save_connection(conn, &state.saved_connections, save_pw) {
+                                    Ok((path, updated)) => {
+                                        state.saved_connections = updated;
+                                        state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+                                        let pw_note = if save_pw { " (with password)" } else { "" };
+                                        state.mode = Mode::Info(format!("Connection '{}' saved{} to {}", alias, pw_note, path.display()));
+                                    }
+                                    Err(e) => {
+                                        state.mode = Mode::Error(format!("Save failed: {}", e));
+                                    }
+                                }
+                            } else {
+                                state.mode = Mode::Normal;
+                            }
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    state.mode = Mode::Normal;
+                }
+                _ => {}
+            }
+        }
+
+        // ── Connection manager overlay ─────────────────────────────────
+        Mode::ConnectionManager { tab, cursor } => {
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::Normal;
+                }
+                KeyCode::Right | KeyCode::Tab => {
+                    let new_tab = match tab {
+                        ConnectionManagerTab::Connections => ConnectionManagerTab::Saved,
+                        ConnectionManagerTab::Saved => ConnectionManagerTab::Connectors,
+                        ConnectionManagerTab::Connectors => ConnectionManagerTab::Connections,
+                    };
+                    state.mode = Mode::ConnectionManager { tab: new_tab, cursor: 0 };
+                }
+                KeyCode::Left | KeyCode::BackTab => {
+                    let new_tab = match tab {
+                        ConnectionManagerTab::Connections => ConnectionManagerTab::Connectors,
+                        ConnectionManagerTab::Saved => ConnectionManagerTab::Connections,
+                        ConnectionManagerTab::Connectors => ConnectionManagerTab::Saved,
+                    };
+                    state.mode = Mode::ConnectionManager { tab: new_tab, cursor: 0 };
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if cursor > 0 {
+                        state.mode = Mode::ConnectionManager { tab, cursor: cursor - 1 };
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = match &tab {
+                        ConnectionManagerTab::Connections => {
+                            state.connections_summary.len().saturating_sub(1)
+                        }
+                        ConnectionManagerTab::Saved => {
+                            state.saved_connections.len().saturating_sub(1)
+                        }
+                        ConnectionManagerTab::Connectors => {
+                            ConnectionType::all().len().saturating_sub(1)
+                        }
+                    };
+                    if cursor < max {
+                        state.mode = Mode::ConnectionManager { tab, cursor: cursor + 1 };
+                    }
+                }
+                KeyCode::Enter => {
+                    match &tab {
+                        ConnectionManagerTab::Connectors => {
+                            let types = ConnectionType::all();
+                            if cursor < types.len() {
+                                let ct = types[cursor].clone();
+                                state.mode = Mode::ConnectionAdd(ConnectionForm::new(ct));
+                            }
+                        }
+                        ConnectionManagerTab::Saved => {
+                            if cursor < state.saved_connections.len() {
+                                // Suggest an alias from the saved params.
+                                let saved = &state.saved_connections[cursor];
+                                let conn_type = match saved.conn_type.as_str() {
+                                    "sqlite" => ConnectionType::Sqlite,
+                                    _ => ConnectionType::Mysql,
+                                };
+                                let suggested = saved.params.get("path")
+                                    .or_else(|| saved.params.get("database"))
+                                    .cloned()
+                                    .map(|s| {
+                                        std::path::Path::new(&s)
+                                            .file_stem()
+                                            .and_then(|f| f.to_str())
+                                            .unwrap_or(&s)
+                                            .to_string()
+                                    })
+                                    .unwrap_or_else(|| format!("conn{}", cursor + 1));
+                                let _ = conn_type; // used only for alias suggestion
+                                state.mode = Mode::SavedConnectionAlias {
+                                    saved_index: cursor,
+                                    alias: suggested,
+                                };
+                            }
+                        }
+                        ConnectionManagerTab::Connections => {
+                            // Toggle connect/disconnect (also retries on Error)
+                            if cursor < conn_mgr.connections.len() {
+                                if conn_mgr.connections[cursor].is_connected() {
+                                    conn_mgr.disconnect(cursor);
+                                } else {
+                                    // Attempt reconnect; on failure the connection
+                                    // stays in Error state which is visible in the list.
+                                    let _ = conn_mgr.reconnect(cursor).await;
+                                }
+                                refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                                state.mode = Mode::ConnectionManager { tab, cursor };
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('x') => {
+                    if tab == ConnectionManagerTab::Saved && cursor < state.saved_connections.len() {
+                        let removed_id = state.saved_connections[cursor].id.clone();
+                        // Persist removal to config.
+                        if let Ok((_path, updated)) = config::remove_saved_connection(&removed_id, &state.saved_connections) {
+                            state.saved_connections = updated;
+                        } else {
+                            state.saved_connections.remove(cursor);
+                        }
+                        // Refresh summaries so is_saved updates for any live connection with this ID.
+                        state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+                        let new_cursor = cursor.min(state.saved_connections.len().saturating_sub(1));
+                        state.mode = Mode::ConnectionManager { tab, cursor: new_cursor };
+                    } else if tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
+                        conn_mgr.remove_connection(cursor);
+                        refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                        let new_cursor = cursor.min(conn_mgr.connections.len().saturating_sub(1));
+                        state.mode = Mode::ConnectionManager { tab, cursor: new_cursor };
+                    }
+                }
+                KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                    if tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
+                        let conn = &conn_mgr.connections[cursor];
+                        if conn.has_password() {
+                            state.mode = Mode::Confirm {
+                                message: format!(
+                                    "Connection '{}' has a password. Save password to config file? (y/n)",
+                                    conn.alias
+                                ),
+                                tag: ConfirmAction::SaveConnectionWithPassword { conn_index: cursor },
+                            };
+                        } else {
+                            match config::save_connection(conn, &state.saved_connections, false) {
+                                Ok((path, updated)) => {
+                                    state.saved_connections = updated;
+                                    state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+                                    state.mode = Mode::Info(format!("Connection '{}' saved to {}", conn.alias, path.display()));
+                                }
+                                Err(e) => {
+                                    state.mode = Mode::Error(format!("Save failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Saved connection alias prompt ────────────────────────────────
+        Mode::SavedConnectionAlias { saved_index, ref alias } => {
+            let saved_index = saved_index;
+            let alias = alias.clone();
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::ConnectionManager {
+                        tab: ConnectionManagerTab::Saved,
+                        cursor: saved_index,
+                    };
+                }
+                KeyCode::Enter => {
+                    if !alias.is_empty() {
+                        if let Some(saved) = state.saved_connections.get(saved_index) {
+                            let inherited_id = saved.id.clone();
+                            let conn_type = match saved.conn_type.as_str() {
+                                "sqlite" => ConnectionType::Sqlite,
+                                _ => ConnectionType::Mysql,
+                            };
+                            let params = saved.params.clone();
+                            match conn_type.build_url(&params) {
+                                Ok(url) => {
+                                    let result = conn_mgr.add_connection(
+                                        Some(inherited_id), alias.clone(), conn_type, url, params,
+                                    ).await;
+                                    refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                                    match result {
+                                        Ok(()) => {
+                                            state.mode = Mode::Info(format!(
+                                                "Connected '{}'",
+                                                alias,
+                                            ));
+                                        }
+                                        Err(_) => {
+                                            let conn_idx = conn_mgr.connections.len().saturating_sub(1);
+                                            state.mode = Mode::ConnectionManager {
+                                                tab: ConnectionManagerTab::Connections,
+                                                cursor: conn_idx,
+                                            };
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    state.mode = Mode::Error(format!("Invalid params: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Mode::SavedConnectionAlias { ref mut alias, .. } = state.mode {
+                        alias.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Mode::SavedConnectionAlias { ref mut alias, .. } = state.mode {
+                        alias.push(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Connection add form ─────────────────────────────────────────
+        Mode::ConnectionAdd(ref form_state) => {
+            let form = form_state.clone();
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::ConnectionManager {
+                        tab: ConnectionManagerTab::Connectors,
+                        cursor: 0,
+                    };
+                }
+                KeyCode::Tab => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        f.active_field = (f.active_field + 1) % f.fields.len();
+                    }
+                }
+                KeyCode::BackTab => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        if f.active_field == 0 {
+                            f.active_field = f.fields.len() - 1;
+                        } else {
+                            f.active_field -= 1;
+                        }
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('s')
+                    if key.code == KeyCode::Enter
+                        || key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    if form.is_complete() {
+                        let alias = form.alias().to_string();
+                        let conn_type = form.conn_type.clone();
+                        let params = form.values();
+                        match conn_type.build_url(&params) {
+                            Err(e) => {
+                                state.mode = Mode::Error(format!("Invalid params: {}", e));
+                            }
+                            Ok(url) => {
+                                // add_connection adds the connection regardless of
+                                // success/failure (Error state on failure).
+                                let result = conn_mgr.add_connection(None, alias.clone(), conn_type, url, params).await;
+                                refresh_schema_from_conn_mgr(state, engine, conn_mgr);
+                                let conn_idx = conn_mgr.connections.len().saturating_sub(1);
+                                match result {
+                                    Ok(()) => {
+                                        state.mode = Mode::Info(format!(
+                                            "Connected '{}' ({} tables)",
+                                            alias,
+                                            conn_mgr
+                                                .connections
+                                                .last()
+                                                .map(|c| c.original_tables.len())
+                                                .unwrap_or(0)
+                                        ));
+                                    }
+                                    Err(_) => {
+                                        // Connection was added in Error state;
+                                        // go to manager so user can see it and retry.
+                                        state.mode = Mode::ConnectionManager {
+                                            tab: ConnectionManagerTab::Connections,
+                                            cursor: conn_idx,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        f.fields[f.active_field].value.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
+                        f.fields[f.active_field].value.push(c);
+                    }
+                }
                 _ => {}
             }
         }

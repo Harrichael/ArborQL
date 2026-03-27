@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::connection_manager::{ConnectionType, ManagedConnection};
 use crate::schema::VirtualFkDef;
 
 #[derive(Debug, Clone)]
@@ -28,11 +29,26 @@ impl ColumnDefaults {
     }
 }
 
+/// A saved connection definition (no alias — that's ephemeral).
+/// Stores structured params (host, port, etc.) rather than a flat URL.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SavedConnection {
+    /// Stable identity linking saved entries to live connections.
+    pub id: String,
+    #[serde(rename = "type")]
+    pub conn_type: String,
+    /// Structured connection fields (e.g. host, port, user, database, path).
+    /// Password is only included if the user explicitly opted in.
+    #[serde(flatten)]
+    pub params: HashMap<String, String>,
+}
+
 /// Full parsed config returned to callers.
 #[derive(Debug, Default, Clone)]
 pub struct AppConfig {
     pub columns: ColumnDefaults,
     pub virtual_fks: Vec<VirtualFkDef>,
+    pub connections: Vec<SavedConnection>,
     /// Maximum number of history entries to keep in `~/.latticeql/history`.
     /// Defaults to 10 000 when not set in any config file.
     pub history_max_len: usize,
@@ -44,6 +60,8 @@ struct RawConfig {
     columns: RawColumnsConfig,
     #[serde(default)]
     virtual_fks: Vec<RawVirtualFk>,
+    #[serde(default)]
+    connections: Vec<SavedConnection>,
     /// Maximum history file length. `null` / absent means "use default".
     #[serde(default)]
     history_max_len: Option<u64>,
@@ -105,6 +123,7 @@ pub fn load_config() -> Result<AppConfig> {
     let path = home_config_path()?;
     let mut columns = ColumnDefaults::default();
     let mut virtual_fks: Vec<VirtualFkDef> = Vec::new();
+    let mut connections: Vec<SavedConnection> = Vec::new();
     let mut history_max_len: Option<usize> = None;
 
     if path.is_file() {
@@ -126,6 +145,7 @@ pub fn load_config() -> Result<AppConfig> {
                 virtual_fks.push(vfk);
             }
         }
+        connections = parsed.connections;
         if let Some(v) = parsed.history_max_len {
             history_max_len = Some(v as usize);
         }
@@ -134,6 +154,7 @@ pub fn load_config() -> Result<AppConfig> {
     Ok(AppConfig {
         columns,
         virtual_fks,
+        connections,
         history_max_len: history_max_len.unwrap_or(10_000),
     })
 }
@@ -165,6 +186,92 @@ pub fn save_virtual_fks(vfks: &[VirtualFkDef]) -> Result<PathBuf> {
     let json = serde_json::to_string_pretty(&root)?;
     fs::write(&path, json)?;
     Ok(path)
+}
+
+/// Save or update a single connection in `~/.latticeql/default.jsonnet`.
+/// If a saved entry with the same `id` exists, it is replaced; otherwise appended.
+/// Password is only included when `save_password` is true.
+pub fn save_connection(
+    conn: &ManagedConnection,
+    existing_saved: &[SavedConnection],
+    save_password: bool,
+) -> Result<(PathBuf, Vec<SavedConnection>)> {
+    let path = home_config_path()?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut root: serde_json::Value = if path.is_file() {
+        let raw = fs::read_to_string(&path)?;
+        let rendered = evaluate_with_filename(raw.trim(), &path.display().to_string())
+            .map_err(|e| anyhow::anyhow!("jsonnet eval failed for {}: {}", path.display(), e))?;
+        rendered.to_json_value()
+    } else {
+        serde_json::json!({})
+    };
+
+    let mut params = conn.params.clone();
+    if !save_password {
+        params.remove("password");
+    }
+    params.remove("alias");
+
+    let new_entry = SavedConnection {
+        id: conn.id.clone(),
+        conn_type: match conn.conn_type {
+            ConnectionType::Sqlite => "sqlite".to_string(),
+            ConnectionType::Mysql => "mysql".to_string(),
+        },
+        params,
+    };
+
+    // Build updated list: replace existing entry by ID, or append.
+    let mut updated: Vec<SavedConnection> = existing_saved
+        .iter()
+        .filter(|s| s.id != conn.id)
+        .cloned()
+        .collect();
+    updated.push(new_entry);
+
+    root["connections"] = serde_json::to_value(&updated)?;
+
+    let json = serde_json::to_string_pretty(&root)?;
+    fs::write(&path, json)?;
+    Ok((path, updated))
+}
+
+/// Remove a saved connection by ID from `~/.latticeql/default.jsonnet`.
+pub fn remove_saved_connection(
+    id: &str,
+    existing_saved: &[SavedConnection],
+) -> Result<(PathBuf, Vec<SavedConnection>)> {
+    let path = home_config_path()?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut root: serde_json::Value = if path.is_file() {
+        let raw = fs::read_to_string(&path)?;
+        let rendered = evaluate_with_filename(raw.trim(), &path.display().to_string())
+            .map_err(|e| anyhow::anyhow!("jsonnet eval failed for {}: {}", path.display(), e))?;
+        rendered.to_json_value()
+    } else {
+        serde_json::json!({})
+    };
+
+    let updated: Vec<SavedConnection> = existing_saved
+        .iter()
+        .filter(|s| s.id != id)
+        .cloned()
+        .collect();
+
+    root["connections"] = serde_json::to_value(&updated)?;
+
+    let json = serde_json::to_string_pretty(&root)?;
+    fs::write(&path, json)?;
+    Ok((path, updated))
 }
 
 /// Kept for backward-compat; callers that only need columns can use this.

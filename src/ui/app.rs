@@ -1,4 +1,5 @@
 use crate::command_history::CommandHistory;
+use crate::connection_manager::ConnectionType;
 use crate::rules::Rule;
 use crate::schema::{TablePath, VirtualFkDef};
 use std::collections::HashMap;
@@ -149,6 +150,107 @@ pub enum Mode {
         /// Input buffer saved before entering search mode (restored on Esc).
         saved_input: String,
     },
+    /// Confirmation dialog: user must pick y/n.
+    Confirm {
+        message: String,
+        /// What to do on Yes/No — stored as an opaque tag the handler interprets.
+        tag: ConfirmAction,
+    },
+    /// User is browsing the connection manager.
+    ConnectionManager {
+        tab: ConnectionManagerTab,
+        cursor: usize,
+    },
+    /// User is filling the connection creation form.
+    ConnectionAdd(ConnectionForm),
+    /// User is entering an alias for a saved connection before connecting.
+    SavedConnectionAlias {
+        /// Index into `state.saved_connections`.
+        saved_index: usize,
+        /// The alias being typed.
+        alias: String,
+    },
+}
+
+/// Actions that can follow a confirmation dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    /// Save a single connection — user decides whether to include the password.
+    SaveConnectionWithPassword { conn_index: usize },
+}
+
+/// Which tab is active in the connection manager.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionManagerTab {
+    /// List of active/disconnected connections.
+    Connections,
+    /// Saved connection configs (need alias before connecting).
+    Saved,
+    /// List of connector types (to start a wizard).
+    Connectors,
+}
+
+/// State for the connection creation form (single-screen, Tab-navigable fields).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionForm {
+    pub conn_type: ConnectionType,
+    pub fields: Vec<ConnectionFormField>,
+    pub active_field: usize,
+}
+
+impl ConnectionForm {
+    pub fn new(conn_type: ConnectionType) -> Self {
+        let defs = conn_type.fields();
+        let fields = defs
+            .into_iter()
+            .map(|d| ConnectionFormField {
+                name: d.name,
+                label: d.label,
+                value: String::new(),
+                placeholder: d.placeholder,
+                required: d.required,
+            })
+            .collect();
+        Self {
+            conn_type,
+            fields,
+            active_field: 0,
+        }
+    }
+
+    /// Returns true when all required fields have values.
+    pub fn is_complete(&self) -> bool {
+        self.fields
+            .iter()
+            .all(|f| !f.required || !f.value.is_empty())
+    }
+
+    /// Collect field values into a HashMap for URL building.
+    pub fn values(&self) -> std::collections::HashMap<String, String> {
+        self.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.value.clone()))
+            .collect()
+    }
+
+    /// Get the alias field value.
+    pub fn alias(&self) -> &str {
+        self.fields
+            .iter()
+            .find(|f| f.name == "alias")
+            .map(|f| f.value.as_str())
+            .unwrap_or("")
+    }
+}
+
+/// A single field in the connection creation form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectionFormField {
+    pub name: String,
+    pub label: String,
+    pub value: String,
+    pub placeholder: String,
+    pub required: bool,
 }
 
 /// Working item in column manager overlay.
@@ -222,6 +324,14 @@ pub struct AppState {
     pub history_draft: String,
     /// Set to true by the key handler to request a Ctrl+Z terminal suspend.
     pub should_suspend: bool,
+    /// Connection summaries for the connection manager overlay.
+    pub connections_summary: Vec<crate::connection_manager::ConnectionSummary>,
+    /// Saved connection configs from the config file.
+    pub saved_connections: Vec<crate::config::SavedConnection>,
+    /// Fully-qualified table names for display (always prefixed when multi-connection).
+    pub display_table_names: Vec<String>,
+    /// Maps engine table names to display-qualified names (e.g. "users" → "ecommerce.users").
+    pub display_name_map: HashMap<String, String>,
 }
 
 impl AppState {
@@ -258,7 +368,32 @@ impl AppState {
             history_cursor: None,
             history_draft: String::new(),
             should_suspend: false,
+            connections_summary: Vec::new(),
+            saved_connections: Vec::new(),
+            display_table_names: Vec::new(),
+            display_name_map: HashMap::new(),
         }
+    }
+
+    /// Return table names for command completion: includes both engine names
+    /// and display-qualified names (deduplicated, sorted).
+    pub fn completion_table_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.table_names.clone();
+        for dn in &self.display_table_names {
+            if !names.contains(dn) {
+                names.push(dn.clone());
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Return the display-qualified form of a table name.
+    pub fn display_name<'a>(&'a self, table: &'a str) -> &'a str {
+        self.display_name_map
+            .get(table)
+            .map(|s| s.as_str())
+            .unwrap_or(table)
     }
 
     pub fn configured_defaults_for_table(&self, table: &str) -> &[String] {
