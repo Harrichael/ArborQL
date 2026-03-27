@@ -1,5 +1,7 @@
 ## Connection Manager P2s
 
+clause --resume "connection-manager-implementation"
+
 1. Alias validation — prevent dots, spaces, and empty strings in connection aliases.
    These break the `alias.table` qualified name syntax.
 
