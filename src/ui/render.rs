@@ -70,8 +70,16 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
         Mode::LogViewer { .. } => render_log_viewer(f, state),
         Mode::ManualList { .. } => render_manual_list(f, state),
         Mode::ManualView { .. } => render_manual_view(f, state),
+        Mode::Confirm { message, .. } => {
+            let message = message.clone();
+            render_overlay_message(f, &message, Color::Yellow);
+        }
         Mode::ConnectionManager { .. } => render_connection_manager(f, state),
         Mode::ConnectionAdd(_) => render_connection_add(f, state),
+        Mode::SavedConnectionAlias { ref alias, .. } => {
+            let alias = alias.clone();
+            render_alias_prompt(f, &alias);
+        }
         Mode::Error(msg) => {
             let msg = msg.clone();
             render_overlay_message(f, &format!("Error: {}", msg), Color::Red);
@@ -850,7 +858,7 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
     f.render_widget(Clear, area);
 
     let block = Block::default()
-        .title(" Connection Manager  (←→/Tab: switch tab · ↑↓: navigate · Enter: select · Esc: close) ")
+        .title(" Connection Manager  (←→/Tab: switch tab · ↑↓: navigate · Enter: select · Ctrl+S: save · Esc: close) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -872,6 +880,11 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let saved_style = if tab == ConnectionManagerTab::Saved {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let types_style = if tab == ConnectionManagerTab::Connectors {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -879,6 +892,8 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
     };
     let tab_line = Line::from(vec![
         Span::styled("  [Connections]", conn_style),
+        Span::raw("    "),
+        Span::styled("[Saved]", saved_style),
         Span::raw("    "),
         Span::styled("[Connectors]", types_style),
     ]);
@@ -896,10 +911,11 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                 f.render_widget(List::new(items), list_area);
             } else {
                 // Compute column widths for alignment.
+                // +2 for "* " unsaved indicator before alias.
                 let max_alias = summaries.iter().map(|s| s.alias.len()).max().unwrap_or(4).max(4);
                 let max_type = summaries.iter().map(|s| s.conn_type.len()).max().unwrap_or(4).max(4);
                 let avail_url = (list_area.width as usize)
-                    .saturating_sub(2 + 2 + max_alias + 2 + max_type + 2 + 14 + 12);
+                    .saturating_sub(2 + 2 + 2 + max_alias + 2 + max_type + 2 + 14 + 12);
 
                 let items: Vec<ListItem> = summaries
                     .iter()
@@ -942,9 +958,6 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                             "—".to_string()
                         };
 
-                        let bg = if is_selected { Color::Blue } else { Color::Reset };
-                        let fg_main = if is_selected { Color::White } else { Color::White };
-                        let fg_type = if is_selected { Color::Cyan } else { Color::Cyan };
                         let fg_url = if matches!(&s.status, ConnectionStatus::Error(_)) {
                             Color::Red
                         } else if is_selected {
@@ -961,34 +974,33 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                             Color::DarkGray
                         };
 
-                        // Compute content width so we can pad the row to full width.
-                        let content_len = 2 + 1 + 2 + max_alias + 2 + max_type
-                            + 2 + url_or_err.len() + 2 + tables_str.len();
-                        let row_width = list_area.width.saturating_sub(2) as usize; // minus borders
-                        let pad = row_width.saturating_sub(content_len);
+                        let save_indicator = if s.is_saved { "  " } else { "* " };
 
                         let line = Line::from(vec![
-                            Span::styled("  ", Style::default().bg(bg)),
-                            Span::styled(status_str, Style::default().fg(status_color).bg(bg)),
-                            Span::styled("  ", Style::default().bg(bg)),
+                            Span::raw("  "),
+                            Span::styled(status_str, Style::default().fg(status_color)),
+                            Span::raw("  "),
+                            Span::styled(save_indicator, Style::default().fg(Color::Yellow)),
                             Span::styled(
                                 format!("{:<width$}", s.alias, width = max_alias),
-                                Style::default().fg(fg_main).bg(bg),
+                                Style::default().fg(Color::White),
                             ),
-                            Span::styled("  ", Style::default().bg(bg)),
+                            Span::raw("  "),
                             Span::styled(
                                 format!("{:<width$}", s.conn_type, width = max_type),
-                                Style::default().fg(fg_type).bg(bg),
+                                Style::default().fg(Color::Cyan),
                             ),
-                            Span::styled("  ", Style::default().bg(bg)),
-                            Span::styled(url_or_err, Style::default().fg(fg_url).bg(bg)),
-                            Span::styled("  ", Style::default().bg(bg)),
-                            Span::styled(
-                                format!("{}{}", tables_str, " ".repeat(pad)),
-                                Style::default().fg(fg_tables).bg(bg),
-                            ),
+                            Span::raw("  "),
+                            Span::styled(url_or_err, Style::default().fg(fg_url)),
+                            Span::raw("  "),
+                            Span::styled(tables_str, Style::default().fg(fg_tables)),
                         ]);
-                        ListItem::new(line)
+                        let item = ListItem::new(line);
+                        if is_selected {
+                            item.style(Style::default().bg(Color::Blue))
+                        } else {
+                            item
+                        }
                     })
                     .collect();
 
@@ -996,6 +1008,49 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                     Block::default()
                         .title_bottom(Line::from(Span::styled(
                             " Enter: toggle connect/disconnect · d/x: remove ",
+                            Style::default().fg(Color::DarkGray),
+                        )))
+                );
+                f.render_widget(list, list_area);
+            }
+        }
+        ConnectionManagerTab::Saved => {
+            let saved = &state.saved_connections;
+            if saved.is_empty() {
+                let items = vec![ListItem::new("  (no saved connections — use Ctrl+S to save current connections)")
+                    .style(Style::default().fg(Color::DarkGray))];
+                f.render_widget(List::new(items), list_area);
+            } else {
+                let items: Vec<ListItem> = saved
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let type_label = s.conn_type.to_uppercase();
+                        let detail = match s.conn_type.as_str() {
+                            "sqlite" => {
+                                s.params.get("path").cloned().unwrap_or_default()
+                            }
+                            "mysql" => {
+                                let host = s.params.get("host").cloned().unwrap_or_default();
+                                let db = s.params.get("database").cloned().unwrap_or_default();
+                                let user = s.params.get("user").cloned().unwrap_or_default();
+                                format!("{}@{}/{}", user, host, db)
+                            }
+                            _ => String::new(),
+                        };
+                        let text = format!("  {:<8} {}", type_label, detail);
+                        let item = ListItem::new(text);
+                        if i == cursor {
+                            item.style(Style::default().bg(Color::Blue).fg(Color::White))
+                        } else {
+                            item
+                        }
+                    })
+                    .collect();
+                let list = List::new(items).block(
+                    Block::default()
+                        .title_bottom(Line::from(Span::styled(
+                            " Enter: connect with alias · d/x: remove ",
                             Style::default().fg(Color::DarkGray),
                         )))
                 );
@@ -1106,6 +1161,26 @@ fn render_connection_add(f: &mut Frame, state: &mut AppState) {
         .collect();
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_alias_prompt(f: &mut Frame, alias: &str) {
+    let area = centered_rect(50, 20, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Enter alias for this connection (Enter: connect · Esc: cancel) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line = Line::from(vec![
+        Span::styled("  Alias: ", Style::default().fg(Color::White)),
+        Span::styled(alias.to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled("▌", Style::default().fg(Color::Yellow)),
+    ]);
+    f.render_widget(Paragraph::new(line), inner);
 }
 
 /// Compute a centered rect that is `percent_x`% wide and `percent_y`% tall.

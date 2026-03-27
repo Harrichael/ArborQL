@@ -120,6 +120,48 @@ impl ConnectionType {
         }
     }
 
+    /// Parse a URL back into structured field values.
+    pub fn params_from_url(url: &str) -> HashMap<String, String> {
+        let mut params = HashMap::new();
+        if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
+            let path = url
+                .strip_prefix("sqlite://")
+                .or_else(|| url.strip_prefix("sqlite:"))
+                .unwrap_or(url);
+            params.insert("path".to_string(), path.to_string());
+        } else if url.starts_with("mysql://") || url.starts_with("mysql+tls://") {
+            // mysql://user:pass@host:port/database
+            let rest = url
+                .strip_prefix("mysql+tls://")
+                .or_else(|| url.strip_prefix("mysql://"))
+                .unwrap_or(url);
+            if let Some(at_pos) = rest.find('@') {
+                let userpass = &rest[..at_pos];
+                let hostdb = &rest[at_pos + 1..];
+                if let Some(colon) = userpass.find(':') {
+                    params.insert("user".to_string(), userpass[..colon].to_string());
+                    params.insert("password".to_string(), userpass[colon + 1..].to_string());
+                } else {
+                    params.insert("user".to_string(), userpass.to_string());
+                }
+                if let Some(slash) = hostdb.find('/') {
+                    let hostport = &hostdb[..slash];
+                    let database = &hostdb[slash + 1..];
+                    params.insert("database".to_string(), database.to_string());
+                    if let Some(colon) = hostport.find(':') {
+                        params.insert("host".to_string(), hostport[..colon].to_string());
+                        params.insert("port".to_string(), hostport[colon + 1..].to_string());
+                    } else {
+                        params.insert("host".to_string(), hostport.to_string());
+                    }
+                } else {
+                    params.insert("host".to_string(), hostdb.to_string());
+                }
+            }
+        }
+        params
+    }
+
     /// Infer the connection type from a URL.
     pub fn from_url(url: &str) -> Option<Self> {
         if url.starts_with("sqlite://") || url.starts_with("sqlite:") {
@@ -164,9 +206,14 @@ impl ConnectionStatus {
 
 /// A single database connection managed by the ConnectionManager.
 pub struct ManagedConnection {
+    /// Stable identity for linking live connections to saved entries.
+    pub id: String,
     pub alias: String,
     pub conn_type: ConnectionType,
     pub url: String,
+    /// Structured connection parameters (field name → value).
+    /// Present when created via the form; parsed from URL for CLI connections.
+    pub params: HashMap<String, String>,
     pub status: ConnectionStatus,
     /// Active database handle. `None` when not connected.
     pub db: Option<Box<dyn Database>>,
@@ -183,6 +230,13 @@ pub struct ManagedConnection {
 impl ManagedConnection {
     pub fn is_connected(&self) -> bool {
         self.status.is_connected()
+    }
+
+    pub fn has_password(&self) -> bool {
+        self.params
+            .get("password")
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -217,22 +271,28 @@ impl ConnectionManager {
     /// it in the manager and retry.
     pub async fn add_connection(
         &mut self,
+        id: Option<String>,
         alias: String,
         conn_type: ConnectionType,
         url: String,
+        params: HashMap<String, String>,
     ) -> Result<()> {
         // Check for duplicate alias
         if self.connections.iter().any(|c| c.alias == alias) {
             anyhow::bail!("Connection alias '{}' already in use", alias);
         }
 
+        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         match self.try_connect(&url).await {
             Ok((db, table_names, table_infos)) => {
                 let count = table_names.len();
                 self.connections.push(ManagedConnection {
+                    id,
                     alias,
                     conn_type,
                     url,
+                    params,
                     status: ConnectionStatus::Connected,
                     db: Some(db),
                     original_tables: table_names,
@@ -246,9 +306,11 @@ impl ConnectionManager {
             Err(e) => {
                 let msg = e.to_string();
                 self.connections.push(ManagedConnection {
+                    id,
                     alias: alias.clone(),
                     conn_type,
                     url,
+                    params,
                     status: ConnectionStatus::Error(msg.clone()),
                     db: None,
                     original_tables: Vec::new(),
@@ -638,10 +700,12 @@ impl ConnectionManager {
     }
 
     /// Return summaries for the UI.
-    pub fn connection_summaries(&self) -> Vec<ConnectionSummary> {
+    /// `saved_ids` is the set of IDs that exist in the saved connections config.
+    pub fn connection_summaries(&self, saved_ids: &std::collections::HashSet<String>) -> Vec<ConnectionSummary> {
         self.connections
             .iter()
             .map(|c| ConnectionSummary {
+                id: c.id.clone(),
                 alias: c.alias.clone(),
                 conn_type: c.conn_type.label().to_string(),
                 url: Self::display_url(&c.url),
@@ -649,6 +713,7 @@ impl ConnectionManager {
                 table_count: c.original_tables.len(),
                 last_table_count: c.last_table_count,
                 last_synced: c.last_synced,
+                is_saved: saved_ids.contains(&c.id),
             })
             .collect()
     }
@@ -657,6 +722,7 @@ impl ConnectionManager {
 /// Summary of a connection for UI display.
 #[derive(Debug, Clone)]
 pub struct ConnectionSummary {
+    pub id: String,
     pub alias: String,
     pub conn_type: String,
     pub url: String,
@@ -667,6 +733,8 @@ pub struct ConnectionSummary {
     pub last_table_count: usize,
     /// When the schema was last synced.
     pub last_synced: Option<DateTime<Local>>,
+    /// Whether this connection is persisted in the config.
+    pub is_saved: bool,
 }
 
 // ── Database trait implementation ───────────────────────────────────────────

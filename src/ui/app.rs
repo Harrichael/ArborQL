@@ -150,6 +150,12 @@ pub enum Mode {
         /// Input buffer saved before entering search mode (restored on Esc).
         saved_input: String,
     },
+    /// Confirmation dialog: user must pick y/n.
+    Confirm {
+        message: String,
+        /// What to do on Yes/No — stored as an opaque tag the handler interprets.
+        tag: ConfirmAction,
+    },
     /// User is browsing the connection manager.
     ConnectionManager {
         tab: ConnectionManagerTab,
@@ -157,6 +163,20 @@ pub enum Mode {
     },
     /// User is filling the connection creation form.
     ConnectionAdd(ConnectionForm),
+    /// User is entering an alias for a saved connection before connecting.
+    SavedConnectionAlias {
+        /// Index into `state.saved_connections`.
+        saved_index: usize,
+        /// The alias being typed.
+        alias: String,
+    },
+}
+
+/// Actions that can follow a confirmation dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    /// Save a single connection — user decides whether to include the password.
+    SaveConnectionWithPassword { conn_index: usize },
 }
 
 /// Which tab is active in the connection manager.
@@ -164,6 +184,8 @@ pub enum Mode {
 pub enum ConnectionManagerTab {
     /// List of active/disconnected connections.
     Connections,
+    /// Saved connection configs (need alias before connecting).
+    Saved,
     /// List of connector types (to start a wizard).
     Connectors,
 }
@@ -304,6 +326,8 @@ pub struct AppState {
     pub should_suspend: bool,
     /// Connection summaries for the connection manager overlay.
     pub connections_summary: Vec<crate::connection_manager::ConnectionSummary>,
+    /// Saved connection configs from the config file.
+    pub saved_connections: Vec<crate::config::SavedConnection>,
     /// Fully-qualified table names for display (always prefixed when multi-connection).
     pub display_table_names: Vec<String>,
     /// Maps engine table names to display-qualified names (e.g. "users" → "ecommerce.users").
@@ -345,6 +369,7 @@ impl AppState {
             history_draft: String::new(),
             should_suspend: false,
             connections_summary: Vec::new(),
+            saved_connections: Vec::new(),
             display_table_names: Vec::new(),
             display_name_map: HashMap::new(),
         }
