@@ -1,0 +1,29 @@
+P3 follow-ups for IDDFS pathfinding feature
+============================================
+
+1. Add a resumption test
+   Existing test signatures were updated but there's no test exercising the
+   actual new behavior (calling find_paths with start_depth > 1, verifying
+   next_depth/has_more semantics). Would catch regressions if the algorithm
+   changes again.
+
+2. Show path count
+   Users currently have no sense of "how many am I looking at." Something like
+   " 10 paths (depth 1-3) " in the title or bottom border would give
+   orientation, especially after pressing 'n' a few times.
+
+3. Extract the max_depth constant
+   10 is hardcoded in both engine.rs:169 and main.rs:744. A shared
+   const MAX_PATH_DEPTH: usize = 10 in schema.rs (next to MAX_PATHS) would
+   make the limit discoverable and single-source.
+
+4. has_more can be a false positive
+   If exactly 10 paths are found at depth 5, has_more is true because
+   depth < max_depth, but depths 6-10 might yield zero paths. The user
+   presses 'n', gets nothing, and the indicator disappears. Harmless but
+   slightly anticlimactic. Could track "did this depth actually find anything"
+   to be smarter, but probably not worth the complexity.
+
+5. Clear state.paths on Esc
+   Enter clears it (line 781), Esc doesn't (line 726). Harmless since paths
+   are only read in PathSelection mode, but asymmetric.
