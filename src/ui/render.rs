@@ -933,7 +933,7 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                             format!("{} tables", s.table_count)
                         } else if s.last_table_count > 0 {
                             let synced = s.last_synced
-                                .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                                .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
                                 .unwrap_or_else(|| "unknown".into());
                             format!("{} tables last synced {}", s.last_table_count, synced)
                         } else {
@@ -952,7 +952,7 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                         };
                         let is_stale = !s.status.is_connected() && s.last_table_count > 0;
                         let fg_tables = if is_stale {
-                            Color::DarkGray
+                            Color::Yellow
                         } else if is_selected {
                             Color::Gray
                         } else {
@@ -960,7 +960,7 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                         };
 
                         // Compute content width so we can pad the row to full width.
-                        let content_len = 2 + 1 + 1 + max_alias + 2 + max_type
+                        let content_len = 2 + 1 + 2 + max_alias + 2 + max_type
                             + 2 + url_or_err.len() + 2 + tables_str.len();
                         let row_width = list_area.width.saturating_sub(2) as usize; // minus borders
                         let pad = row_width.saturating_sub(content_len);
@@ -968,7 +968,7 @@ fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
                         let line = Line::from(vec![
                             Span::styled("  ", Style::default().bg(bg)),
                             Span::styled(status_str, Style::default().fg(status_color).bg(bg)),
-                            Span::styled(" ", Style::default().bg(bg)),
+                            Span::styled("  ", Style::default().bg(bg)),
                             Span::styled(
                                 format!("{:<width$}", s.alias, width = max_alias),
                                 Style::default().fg(fg_main).bg(bg),
