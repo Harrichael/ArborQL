@@ -19,9 +19,12 @@ The central insight is that relational data already has structure — foreign ke
 ```
 src/
   main.rs          — entry point, event loop, all keyboard handling
-  engine.rs        — DataNode tree, rule execution, DB queries
+  engine/
+    mod.rs         — re-exports from core and paths
+    core.rs        — Engine, DataNode tree, rule execution, DB queries
+    paths.rs       — PathStep/TablePath types, IDDFS path-finding, edge discovery
   rules.rs         — rule parser/grammar, tokenizer, completion hints
-  schema.rs        — schema discovery, virtual FK definitions, BFS path-finding
+  schema.rs        — schema discovery, virtual FK definitions
   config.rs        — config file loading and merging
   log.rs           — thread-safe log queue
   db/
@@ -46,7 +49,7 @@ The engine holds an ordered list of rules. Re-executing them in order from scrat
 
 **DataNode** is a tree node: it knows its table, its row data (as a `HashMap<String, Value>`), and its children. The tree is flattened to a `Vec<(depth, &DataNode)>` for rendering.
 
-**Schema** is discovered once at startup: table names, column info, real FK constraints, and user-defined virtual FKs. Path-finding (BFS) over this graph produces `TablePath` objects that the engine uses to write JOIN-equivalent queries.
+**Schema** is discovered once at startup: table names, column info, real FK constraints, and user-defined virtual FKs. Path-finding (iterative deepening DFS, max depth 10) over this graph produces `TablePath` objects that the engine uses to write JOIN-equivalent queries. The search is resumable — the UI can request more paths beyond the initial 10.
 
 **AppState** owns all UI state: current mode, cursor positions, visible columns per table, column ordering, rules list, overlay data. It is passed (mutably) to both the keyboard handler and the renderer.
 
