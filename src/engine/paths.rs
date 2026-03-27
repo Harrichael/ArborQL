@@ -172,6 +172,57 @@ fn dfs_at_depth(
     }
 }
 
+/// Extract the bare table name from a potentially qualified `"alias.table"` name.
+fn bare_table_name(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(pos) => &name[pos + 1..],
+        None => name,
+    }
+}
+
+/// Extract the alias prefix (including dot) from a qualified name, or `""` if bare.
+fn alias_prefix(name: &str) -> &str {
+    match name.rfind('.') {
+        Some(pos) => &name[..pos + 1],
+        None => "",
+    }
+}
+
+/// Check if a VFK table name matches a schema table name.
+/// If the VFK name is already qualified (contains a dot), use exact match.
+/// Otherwise, compare against the bare portion of the schema name.
+fn vfk_table_matches(vfk_name: &str, schema_name: &str) -> bool {
+    if vfk_name.contains('.') {
+        vfk_name == schema_name
+    } else {
+        bare_table_name(schema_name) == vfk_name
+    }
+}
+
+/// Resolve a VFK target table name into the schema namespace, applying the same
+/// alias prefix as the source table. Returns `None` if the resolved target
+/// doesn't exist in the schema.
+fn resolve_vfk_target(schema: &Schema, vfk_target: &str, source_table: &str) -> Option<String> {
+    if vfk_target.contains('.') {
+        // Already qualified — use as-is if it exists
+        if schema.tables.contains_key(vfk_target) {
+            Some(vfk_target.to_string())
+        } else {
+            None
+        }
+    } else {
+        let prefix = alias_prefix(source_table);
+        let qualified = format!("{}{}", prefix, vfk_target);
+        if schema.tables.contains_key(&qualified) {
+            Some(qualified)
+        } else if schema.tables.contains_key(vfk_target) {
+            Some(vfk_target.to_string())
+        } else {
+            None
+        }
+    }
+}
+
 /// Return all FK edges (forward, reverse, virtual) out of `table` as
 /// `(next_table, step)` pairs.
 fn edges_from(schema: &Schema, table: &str) -> Vec<(String, PathStep)> {
@@ -208,34 +259,38 @@ fn edges_from(schema: &Schema, table: &str) -> Vec<(String, PathStep)> {
 
     // Forward virtual FK edges
     for vfk in &schema.virtual_fks {
-        if vfk.from_table == table {
-            edges.push((vfk.to_table.clone(), PathStep {
-                from_table: table.to_string(),
-                from_column: vfk.id_column.clone(),
-                to_table: vfk.to_table.clone(),
-                to_column: vfk.to_column.clone(),
-                source_type_filter: vfk.type_column.as_ref()
-                    .zip(vfk.type_value.as_ref())
-                    .map(|(col, val)| (col.clone(), val.clone())),
-                ..Default::default()
-            }));
+        if vfk_table_matches(&vfk.from_table, table) {
+            if let Some(target) = resolve_vfk_target(schema, &vfk.to_table, table) {
+                edges.push((target.clone(), PathStep {
+                    from_table: table.to_string(),
+                    from_column: vfk.id_column.clone(),
+                    to_table: target,
+                    to_column: vfk.to_column.clone(),
+                    source_type_filter: vfk.type_column.as_ref()
+                        .zip(vfk.type_value.as_ref())
+                        .map(|(col, val)| (col.clone(), val.clone())),
+                    ..Default::default()
+                }));
+            }
         }
     }
 
     // Reverse virtual FK edges
     for vfk in &schema.virtual_fks {
-        if vfk.to_table == table {
-            let target_extra_where = vfk.type_column.as_ref()
-                .zip(vfk.type_value.as_ref())
-                .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
-            edges.push((vfk.from_table.clone(), PathStep {
-                from_table: table.to_string(),
-                from_column: vfk.to_column.clone(),
-                to_table: vfk.from_table.clone(),
-                to_column: vfk.id_column.clone(),
-                target_extra_where,
-                ..Default::default()
-            }));
+        if vfk_table_matches(&vfk.to_table, table) {
+            if let Some(target) = resolve_vfk_target(schema, &vfk.from_table, table) {
+                let target_extra_where = vfk.type_column.as_ref()
+                    .zip(vfk.type_value.as_ref())
+                    .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
+                edges.push((target.clone(), PathStep {
+                    from_table: table.to_string(),
+                    from_column: vfk.to_column.clone(),
+                    to_table: target,
+                    to_column: vfk.id_column.clone(),
+                    target_extra_where,
+                    ..Default::default()
+                }));
+            }
         }
     }
 
@@ -325,7 +380,7 @@ fn find_step(schema: &Schema, a: &str, b: &str) -> Option<PathStep> {
     }
     // Forward virtual FK: a owns the poly columns, b is the target
     for vfk in &schema.virtual_fks {
-        if vfk.from_table == a && vfk.to_table == b {
+        if vfk_table_matches(&vfk.from_table, a) && vfk_table_matches(&vfk.to_table, b) {
             return Some(PathStep {
                 from_table: a.to_string(),
                 from_column: vfk.id_column.clone(),
@@ -340,7 +395,7 @@ fn find_step(schema: &Schema, a: &str, b: &str) -> Option<PathStep> {
     }
     // Reverse virtual FK: b owns the poly columns, a is the target
     for vfk in &schema.virtual_fks {
-        if vfk.to_table == a && vfk.from_table == b {
+        if vfk_table_matches(&vfk.to_table, a) && vfk_table_matches(&vfk.from_table, b) {
             let target_extra_where = vfk.type_column.as_ref()
                 .zip(vfk.type_value.as_ref())
                 .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
@@ -492,5 +547,66 @@ mod tests {
         for p in &r2.paths {
             assert!(p.steps.len() >= 3, "Resumed paths should be depth 3+");
         }
+    }
+
+    #[test]
+    fn test_vfk_matches_aliased_schema_tables() {
+        // Schema with aliased table names (simulating multi-connection merge)
+        let mut schema = schema_from(vec![
+            make_table("int.comments", vec![]),
+            make_table("int.posts", vec![]),
+        ]);
+        // VFK with bare names (no alias)
+        schema.virtual_fks.push(crate::schema::VirtualFkDef {
+            from_table: "comments".to_string(),
+            type_column: Some("commentable_type".to_string()),
+            type_value: Some("Post".to_string()),
+            id_column: "commentable_id".to_string(),
+            to_table: "posts".to_string(),
+            to_column: "id".to_string(),
+        });
+
+        // edges_from should find forward VFK edge from int.comments → int.posts
+        let edges = edges_from(&schema, "int.comments");
+        let vfk_edges: Vec<_> = edges.iter()
+            .filter(|(_, step)| step.source_type_filter.is_some())
+            .collect();
+        assert_eq!(vfk_edges.len(), 1, "Should find one forward VFK edge");
+        assert_eq!(vfk_edges[0].0, "int.posts");
+        assert_eq!(vfk_edges[0].1.from_table, "int.comments");
+        assert_eq!(vfk_edges[0].1.to_table, "int.posts");
+
+        // edges_from should find reverse VFK edge from int.posts → int.comments
+        let reverse_edges = edges_from(&schema, "int.posts");
+        let rev_vfk_edges: Vec<_> = reverse_edges.iter()
+            .filter(|(_, step)| step.target_extra_where.is_some())
+            .collect();
+        assert_eq!(rev_vfk_edges.len(), 1, "Should find one reverse VFK edge");
+        assert_eq!(rev_vfk_edges[0].0, "int.comments");
+    }
+
+    #[test]
+    fn test_vfk_does_not_cross_aliases() {
+        // Schema with tables from two different aliases
+        let mut schema = schema_from(vec![
+            make_table("int.comments", vec![]),
+            make_table("stg.posts", vec![]),  // different alias!
+        ]);
+        schema.virtual_fks.push(crate::schema::VirtualFkDef {
+            from_table: "comments".to_string(),
+            type_column: None,
+            type_value: None,
+            id_column: "post_id".to_string(),
+            to_table: "posts".to_string(),
+            to_column: "id".to_string(),
+        });
+
+        // edges_from int.comments should NOT find an edge to stg.posts
+        let edges = edges_from(&schema, "int.comments");
+        let cross_alias: Vec<_> = edges.iter()
+            .filter(|(target, _)| target == "stg.posts")
+            .collect();
+        assert!(cross_alias.is_empty(),
+            "VFK should not produce cross-alias edges");
     }
 }
