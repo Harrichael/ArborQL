@@ -1,6 +1,7 @@
 use crate::db::{Database, Row};
 use crate::rules::{Rule, conditions_to_sql, row_matches_conditions};
-use crate::schema::{Schema, TablePath};
+use crate::schema::Schema;
+use super::paths::{TablePath, PathSearchResult, find_paths, build_path_from_via};
 use anyhow::Result;
 
 /// A node in the hierarchical data tree.
@@ -118,7 +119,7 @@ impl Engine {
         &mut self,
         db: &dyn Database,
         rule: Rule,
-    ) -> Result<Option<crate::schema::PathSearchResult>> {
+    ) -> Result<Option<PathSearchResult>> {
         match &rule {
             Rule::Filter { table, conditions } => {
                 let table = table.clone();
@@ -166,7 +167,7 @@ impl Engine {
                     }
                 }
                 let result =
-                    crate::schema::find_paths(&self.schema, from_table, to_table, via, 1, 10);
+                    find_paths(&self.schema, from_table, to_table, via, 1, 10);
                 if result.paths.is_empty() {
                     // Log which tables have FKs to help the user understand the schema
                     let schema_fk_summary: Vec<String> = self.schema.tables.iter()
@@ -341,96 +342,6 @@ fn attach_to_all_matching<'a>(
     })
 }
 
-/// Build a `TablePath` from an explicit `via` list.
-fn build_path_from_via(
-    schema: &Schema,
-    from: &str,
-    to: &str,
-    via: &[String],
-) -> Option<TablePath> {
-    // via contains intermediate tables; full sequence is: from → via[0] → via[1] → ... → to
-    let sequence: Vec<&str> = std::iter::once(from)
-        .chain(via.iter().map(|s| s.as_str()))
-        .chain(std::iter::once(to))
-        .collect();
-
-    let mut steps = Vec::new();
-    for window in sequence.windows(2) {
-        let a = window[0];
-        let b = window[1];
-        // Find a FK between a and b
-        if let Some(step) = find_step(schema, a, b) {
-            steps.push(step);
-        } else {
-            return None;
-        }
-    }
-    Some(TablePath { steps })
-}
-
-fn find_step(schema: &Schema, a: &str, b: &str) -> Option<crate::schema::PathStep> {
-    use crate::schema::PathStep;
-    if let Some(info) = schema.tables.get(a) {
-        for fk in &info.foreign_keys {
-            if fk.to_table == b {
-                return Some(PathStep {
-                    from_table: a.to_string(),
-                    from_column: fk.from_column.clone(),
-                    to_table: b.to_string(),
-                    to_column: fk.to_column.clone(),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    // Reverse direction
-    if let Some(info) = schema.tables.get(b) {
-        for fk in &info.foreign_keys {
-            if fk.to_table == a {
-                return Some(PathStep {
-                    from_table: a.to_string(),
-                    from_column: fk.to_column.clone(),
-                    to_table: b.to_string(),
-                    to_column: fk.from_column.clone(),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    // Forward virtual FK: a owns the poly columns, b is the target
-    for vfk in &schema.virtual_fks {
-        if vfk.from_table == a && vfk.to_table == b {
-            return Some(PathStep {
-                from_table: a.to_string(),
-                from_column: vfk.id_column.clone(),
-                to_table: b.to_string(),
-                to_column: vfk.to_column.clone(),
-                source_type_filter: vfk.type_column.as_ref()
-                    .zip(vfk.type_value.as_ref())
-                    .map(|(col, val)| (col.clone(), val.clone())),
-                ..Default::default()
-            });
-        }
-    }
-    // Reverse virtual FK: b owns the poly columns, a is the target
-    for vfk in &schema.virtual_fks {
-        if vfk.to_table == a && vfk.from_table == b {
-            let target_extra_where = vfk.type_column.as_ref()
-                .zip(vfk.type_value.as_ref())
-                .map(|(col, val)| format!("{} = '{}'", col, val.replace('\'', "''")));
-            return Some(PathStep {
-                from_table: a.to_string(),
-                from_column: vfk.to_column.clone(),
-                to_table: b.to_string(),
-                to_column: vfk.id_column.clone(),
-                target_extra_where,
-                ..Default::default()
-            });
-        }
-    }
-    None
-}
-
 
 /// Flatten the data tree into a list of (depth, node_ref) for rendering.
 pub fn flatten_tree(roots: &[DataNode]) -> Vec<(usize, &DataNode)> {
@@ -467,9 +378,9 @@ pub fn available_extra_columns(node: &DataNode) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::paths::PathStep;
     use crate::db::Value;
     use crate::rules;
-    use crate::schema::PathStep;
 
     use std::collections::HashMap;
 

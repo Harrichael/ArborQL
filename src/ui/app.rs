@@ -1,7 +1,8 @@
 use crate::command_history::CommandHistory;
 use crate::connection_manager::ConnectionType;
 use crate::rules::Rule;
-use crate::schema::{TablePath, VirtualFkDef};
+use crate::engine::TablePath;
+use crate::schema::VirtualFkDef;
 use std::collections::HashMap;
 
 /// Which field is active in the virtual FK creation form.
