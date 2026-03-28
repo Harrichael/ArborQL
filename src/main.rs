@@ -21,7 +21,7 @@ use rules::Completion;
 
 use std::io;
 use connection_manager::{ConnectionManager, ConnectionType};
-use ui::app::{AppState, ColumnManagerItem, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
+use ui::app::{AppState, ColumnManagerItem, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, PALETTE_COMMANDS, VirtualFkField, VirtualFkForm};
 use schema::VirtualFkDef;
 
 /// LatticeQL — Navigate complex datasets from multiple sources intuitively.
@@ -445,22 +445,17 @@ async fn handle_key(
             match key.code {
                 KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(false),
                 KeyCode::Char(':') => {
-                    state.mode = Mode::Command;
+                    state.mode = Mode::CommandPalette;
                     state.clear_input();
-                    state.history_cursor = None;
-                    state.history_draft = String::new();
                 }
                 KeyCode::Char('j') | KeyCode::Down => state.select_down(),
                 KeyCode::Char('k') | KeyCode::Up => state.select_up(),
-                KeyCode::Char('f') | KeyCode::Enter => {
+                KeyCode::Enter => {
                     // Toggle fold on selected node
                     let flat = flatten_tree(&engine.roots);
                     if state.selected_row < flat.len() {
                         toggle_fold(&mut engine.roots, state.selected_row);
                     }
-                }
-                KeyCode::Char('s') => {
-                    state.show_schema = !state.show_schema;
                 }
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     // Ctrl+R from Normal mode: jump straight into reverse command search.
@@ -472,89 +467,20 @@ async fn handle_key(
                         saved_input: String::new(),
                     };
                 }
-                KeyCode::Char('r') => {
-                    if !engine.rules.is_empty() {
-                        state.rules = engine.rules.clone();
-                        state.rule_cursor = 0;
-                        state.next_rule_cursor =
-                            state.next_rule_cursor.min(state.rules.len());
-                        state.rule_reorder_undo.clear();
-                        state.rule_reorder_redo.clear();
-                        state.mode = Mode::RuleReorder;
-                    }
-                }
-                KeyCode::Char('c') => {
-                    // Manage table-level tree columns for selected node's table.
-                    let flat = flatten_tree(&engine.roots);
-                    if state.selected_row < flat.len() {
-                        let (_, node) = flat[state.selected_row];
-                        ensure_tree_visibility_for_node(state, node);
-                        let items = column_manager_items_for_table(
-                            state,
-                            &engine.roots,
-                            &node.table,
-                        );
-                        if !items.is_empty() {
-                            state.reset_overlay_search();
-                            state.column_add = Some((node.table.clone(), items, 0));
-                        }
-                    }
-                }
-                KeyCode::Char('v') => {
-                    state.reset_overlay_search();
-                    state.mode = Mode::VirtualFkManager { cursor: 0 };
-                }
-                KeyCode::Char('x') => {
-                    // Prune (remove) the currently selected node from the tree.
-                    let flat = flatten_tree(&engine.roots);
-                    if state.selected_row < flat.len() {
-                        let (_, node) = flat[state.selected_row];
-                        let table = node.table.clone();
-                        // Find primary key column; fall back to "id".
-                        let pk_col = engine
-                            .schema
-                            .tables
-                            .get(&table)
-                            .and_then(|info| {
-                                info.columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone())
-                            })
-                            .unwrap_or_else(|| "id".to_string());
-                        if let Some(pk_val) = node.row.get(&pk_col) {
-                            let conditions = vec![rules::Condition {
-                                column: pk_col,
-                                op: rules::Op::Eq,
-                                value: pk_val.to_string(),
-                            }];
-                            let rule = rules::Rule::Prune {
-                                table: table.clone(),
-                                conditions: conditions.clone(),
-                            };
-                            insert_rule_at_next_cursor(state, engine, rule);
-                            // Prune is in-memory: apply directly without re-fetching from DB.
-                            engine.apply_prune_rule(&table, &conditions);
-                        }
-                    }
-                }
-                KeyCode::Char('l') => {
-                    state.mode = Mode::LogViewer { cursor: state.logs.len().saturating_sub(1) };
-                }
-                KeyCode::Char('m') => {
-                    state.mode = Mode::ManualList { cursor: 0 };
-                }
-                KeyCode::Char('+') => {
-                    state.reset_overlay_search();
-                    state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
-                    state.mode = Mode::ConnectionManager {
-                        tab: ConnectionManagerTab::Connections,
-                        cursor: 0,
-                    };
+                KeyCode::Char(c) => {
+                    // Any other character enters query mode with that char.
+                    state.mode = Mode::Query;
+                    state.clear_input();
+                    state.input_char(c);
+                    state.history_cursor = None;
+                    state.history_draft = String::new();
                 }
                 _ => {}
             }
         }
 
-        // ── Command mode ─────────────────────────────────────────────────
-        Mode::Command => {
+        // ── Query mode ───────────────────────────────────────────────────
+        Mode::Query => {
             match key.code {
                 KeyCode::Esc => {
                     state.mode = Mode::Normal;
@@ -664,12 +590,11 @@ async fn handle_key(
                     state.input = saved_input.clone();
                     state.cursor = state.input.len();
                     state.history_cursor = None;
-                    state.mode = Mode::Command;
+                    state.mode = Mode::Query;
                 }
                 KeyCode::Enter => {
-                    // Accept the current match and switch to Command mode.
-                    // The matched command is already in state.input (set while
-                    // rendering), so we just need to switch modes.
+                    // Accept the current match and switch to Query mode.
+                    // The matched text is already resolved below.
                     let matched = state
                         .command_history
                         .search_reverse(&query, match_cursor)
@@ -680,7 +605,7 @@ async fn handle_key(
                         state.cursor = state.input.len();
                     }
                     state.history_cursor = None;
-                    state.mode = Mode::Command;
+                    state.mode = Mode::Query;
                 }
                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match c {
@@ -714,6 +639,127 @@ async fn handle_key(
                         match_cursor: 0,
                         saved_input,
                     };
+                }
+                _ => {}
+            }
+        }
+
+        // ── Command palette (`:` key) ────────────────────────────────────
+        Mode::CommandPalette => {
+            match key.code {
+                KeyCode::Esc => {
+                    state.mode = Mode::Normal;
+                    state.clear_input();
+                }
+                KeyCode::Enter => {
+                    let filter = state.input_text().trim().to_lowercase();
+                    state.clear_input();
+                    // Exact shortcut match takes priority, otherwise require a unique name prefix match.
+                    let shortcut_match = PALETTE_COMMANDS.iter()
+                        .find(|(_, key, _)| *key == filter);
+                    let matched = if let Some((name, _, _)) = shortcut_match {
+                        Some(*name)
+                    } else {
+                        let name_matches: Vec<_> = PALETTE_COMMANDS.iter()
+                            .filter(|(name, _, _)| name.starts_with(&filter))
+                            .collect();
+                        if name_matches.len() == 1 { Some(name_matches[0].0) } else { None }
+                    };
+                    match matched {
+                        Some("quit") => return Ok(false),
+                        Some("schema") => {
+                            state.show_schema = !state.show_schema;
+                            state.mode = Mode::Normal;
+                        }
+                        Some("columns") => {
+                            let flat = flatten_tree(&engine.roots);
+                            if state.selected_row < flat.len() {
+                                let (_, node) = flat[state.selected_row];
+                                ensure_tree_visibility_for_node(state, node);
+                                let items = column_manager_items_for_table(
+                                    state, &engine.roots, &node.table,
+                                );
+                                if !items.is_empty() {
+                                    state.reset_overlay_search();
+                                    state.column_add = Some((node.table.clone(), items, 0));
+                                }
+                            }
+                            state.mode = Mode::Normal;
+                        }
+                        Some("lattice") => {
+                            state.reset_overlay_search();
+                            state.mode = Mode::VirtualFkManager { cursor: 0 };
+                        }
+                        Some("rules") => {
+                            if !engine.rules.is_empty() {
+                                state.rules = engine.rules.clone();
+                                state.rule_cursor = 0;
+                                state.next_rule_cursor =
+                                    state.next_rule_cursor.min(state.rules.len());
+                                state.rule_reorder_undo.clear();
+                                state.rule_reorder_redo.clear();
+                                state.mode = Mode::RuleReorder;
+                            } else {
+                                state.mode = Mode::Normal;
+                            }
+                        }
+                        Some("connections") => {
+                            state.reset_overlay_search();
+                            state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+                            state.mode = Mode::ConnectionManager {
+                                tab: ConnectionManagerTab::Connections,
+                                cursor: 0,
+                            };
+                        }
+                        Some("logs") => {
+                            state.mode = Mode::LogViewer { cursor: state.logs.len().saturating_sub(1) };
+                        }
+                        Some("manuals") => {
+                            state.mode = Mode::ManualList { cursor: 0 };
+                        }
+                        Some("prune") => {
+                            let flat = flatten_tree(&engine.roots);
+                            if state.selected_row < flat.len() {
+                                let (_, node) = flat[state.selected_row];
+                                let table = node.table.clone();
+                                let pk_col = engine
+                                    .schema
+                                    .tables
+                                    .get(&table)
+                                    .and_then(|info| {
+                                        info.columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone())
+                                    })
+                                    .unwrap_or_else(|| "id".to_string());
+                                if let Some(pk_val) = node.row.get(&pk_col) {
+                                    let conditions = vec![rules::Condition {
+                                        column: pk_col,
+                                        op: rules::Op::Eq,
+                                        value: pk_val.to_string(),
+                                    }];
+                                    let rule = rules::Rule::Prune {
+                                        table: table.clone(),
+                                        conditions: conditions.clone(),
+                                    };
+                                    insert_rule_at_next_cursor(state, engine, rule);
+                                    engine.apply_prune_rule(&table, &conditions);
+                                }
+                            }
+                            state.mode = Mode::Normal;
+                        }
+                        _ => {
+                            state.mode = Mode::Normal;
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if state.input.is_empty() {
+                        state.mode = Mode::Normal;
+                    } else {
+                        state.input_backspace();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    state.input_char(c);
                 }
                 _ => {}
             }

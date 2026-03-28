@@ -1,7 +1,7 @@
 use crate::connection_manager::{ConnectionStatus, ConnectionType};
 use crate::engine::{flatten_tree, DataNode};
 use crate::rules::{completions_at, Completion};
-use crate::ui::app::{AppState, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
+use crate::ui::app::{AppState, ConnectionManagerTab, Mode, PALETTE_COMMANDS, VirtualFkField, VirtualFkForm};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -41,7 +41,7 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
 
     // Split main_area into data viewer + command bar.
     // In Command mode and CommandSearch mode we use an extra row for hints/search.
-    let cmd_height: u16 = if matches!(state.mode, Mode::Command | Mode::CommandSearch { .. }) { 4 } else { 3 };
+    let cmd_height: u16 = if matches!(state.mode, Mode::Normal | Mode::Query | Mode::CommandPalette | Mode::CommandSearch { .. }) { 4 } else { 3 };
     let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(cmd_height)])
@@ -204,10 +204,10 @@ fn render_data_viewer(
     };
 
     let title = if flat.is_empty() {
-        " Data Viewer (empty — type ':' to enter a command) ".to_string()
+        " Data Playground ".to_string()
     } else {
         format!(
-            " Data Viewer [{}/{}] ",
+            " Data Playground [{}/{}] ",
             state.selected_row + 1,
             flat.len()
         )
@@ -237,19 +237,18 @@ fn render_data_viewer(
 }
 
 fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
-    if state.mode == Mode::Command {
-        let block = Block::default().title(" Command ").borders(Borders::ALL);
+    if matches!(state.mode, Mode::Normal | Mode::Query) {
+        let block = Block::default().title(" Query ").borders(Borders::ALL);
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Split inner into: command input line | next-token hint line.
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(inner);
 
-        // Input line
-        let cmd_para = Paragraph::new(format!(":{}", state.input))
+        // Input line (empty in Normal mode, has text in Query mode)
+        let cmd_para = Paragraph::new(state.input.as_str())
             .style(Style::default().fg(Color::White));
         f.render_widget(cmd_para, rows[0]);
 
@@ -262,9 +261,55 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             f.render_widget(hint_para, rows[1]);
         }
 
-        // Place the cursor on the input line.
+        // Show cursor on the input line.
         f.set_cursor_position((
-            area.x + 1 + 1 + state.cursor as u16, // +1 border, +1 for ':'
+            area.x + 1 + state.cursor as u16, // +1 border
+            area.y + 1,
+        ));
+    } else if state.mode == Mode::CommandPalette {
+        let block = Block::default().title(" Commands ").borders(Borders::ALL);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(inner);
+
+        // Input line with ":" prefix
+        let cmd_para = Paragraph::new(format!(":{}", state.input))
+            .style(Style::default().fg(Color::White));
+        f.render_widget(cmd_para, rows[0]);
+
+        // Filtered command list
+        let filter = state.input.to_lowercase();
+        let filtered: Vec<(&str, &str, &str)> = PALETTE_COMMANDS.iter()
+            .filter(|(name, key, _)| filter.is_empty() || name.starts_with(&filter) || *key == filter)
+            .copied()
+            .collect();
+        if !filtered.is_empty() {
+            let hint = if filtered.len() <= 2 {
+                let parts: Vec<String> = filtered.iter()
+                    .map(|(name, key, desc)| if key.is_empty() {
+                        format!("{} — {}", name, desc)
+                    } else {
+                        format!("{} ({}) — {}", name, key, desc)
+                    })
+                    .collect();
+                format!(" {}", parts.join("  ·  "))
+            } else {
+                let parts: Vec<String> = filtered.iter()
+                    .map(|(name, key, _)| if key.is_empty() { name.to_string() } else { format!("{} ({})", name, key) })
+                    .collect();
+                format!(" {}", parts.join("  ·  "))
+            };
+            let hint_para = Paragraph::new(hint)
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(hint_para, rows[1]);
+        }
+
+        f.set_cursor_position((
+            area.x + 1 + 1 + state.cursor as u16, // +1 border, +1 for ":"
             area.y + 1,
         ));
     } else if let Mode::CommandSearch { ref query, match_cursor, .. } = state.mode {
@@ -309,13 +354,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             matches!(e.level, crate::log::LogLevel::Warn | crate::log::LogLevel::Error)
         });
         let alert = if has_warn_or_error { " ⚠ " } else { "" };
-        let (title, display) = match &state.mode {
-            Mode::Normal => (
-                " LatticeQL ",
-                " ':' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  '+' connections  'm' manuals  'l' logs  'q' quit",
-            ),
-            _ => (" LatticeQL ", ""),
-        };
+        let (title, display) = (" LatticeQL ", "");
         let full_title = format!("{}{}", alert, title);
         let title_style = if has_warn_or_error {
             Style::default().fg(Color::Yellow)
@@ -345,7 +384,7 @@ fn format_completions(completions: &[Completion]) -> String {
             Completion::QuotedValue => "'<value>'".to_string(),
         })
         .collect();
-    let mut text = format!(" {}", parts.join("  ·  "));
+    let mut text = parts.join("  ·  ");
     if total > MAX_SHOW {
         text.push_str(&format!("  +{} more", total - MAX_SHOW));
     }
