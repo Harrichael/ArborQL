@@ -654,10 +654,18 @@ async fn handle_key(
                 KeyCode::Enter => {
                     let filter = state.input_text().trim().to_lowercase();
                     state.clear_input();
-                    // Find first command whose name starts with the filter.
-                    let matched = PALETTE_COMMANDS.iter()
-                        .find(|(name, _, _)| name.starts_with(&filter));
-                    match matched.map(|(name, _, _)| *name) {
+                    // Exact shortcut match takes priority, otherwise require a unique name prefix match.
+                    let shortcut_match = PALETTE_COMMANDS.iter()
+                        .find(|(_, key, _)| *key == filter);
+                    let matched = if let Some((name, _, _)) = shortcut_match {
+                        Some(*name)
+                    } else {
+                        let name_matches: Vec<_> = PALETTE_COMMANDS.iter()
+                            .filter(|(name, _, _)| name.starts_with(&filter))
+                            .collect();
+                        if name_matches.len() == 1 { Some(name_matches[0].0) } else { None }
+                    };
+                    match matched {
                         Some("quit") => return Ok(false),
                         Some("schema") => {
                             state.show_schema = !state.show_schema;

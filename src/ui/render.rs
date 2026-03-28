@@ -284,7 +284,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         // Filtered command list
         let filter = state.input.to_lowercase();
         let filtered: Vec<(&str, &str, &str)> = PALETTE_COMMANDS.iter()
-            .filter(|(name, _, _)| filter.is_empty() || name.starts_with(&filter))
+            .filter(|(name, key, _)| filter.is_empty() || name.starts_with(&filter) || *key == filter)
             .copied()
             .collect();
         if !filtered.is_empty() {
