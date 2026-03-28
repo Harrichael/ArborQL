@@ -66,9 +66,16 @@ pub struct PathSearchResult {
 /// Find paths between `from` and `to` using iterative deepening DFS.
 ///
 /// Searches depths `start_depth..=max_depth`, collecting paths shortest-first.
-/// Once 10 or more paths have been accumulated, the current depth level is
-/// finished and the search stops. If `via` is non-empty only paths that pass
-/// through ALL of those intermediate tables are returned.
+/// The search stops early under any of three conditions:
+/// 1. **Max paths**: 10 or more paths accumulated — finishes the current depth
+///    level and stops.
+/// 2. **Max depth**: all depths up to `max_depth` have been searched.
+/// 3. **No marginal progress**: once at least one path has been found, if a
+///    subsequent depth level yields no new paths the search pauses. The caller
+///    can resume it later via `next_depth`.
+///
+/// If `via` is non-empty only paths that pass through ALL of those intermediate
+/// tables (in order) are returned.
 ///
 /// `has_more` is set when `max_depth` has not been exhausted, and `next_depth`
 /// gives the depth to resume from in a subsequent call.
@@ -97,6 +104,7 @@ pub fn find_paths(
     let mut init_visited = std::collections::HashSet::new();
     init_visited.insert(from.to_string());
     let mut path_buf = Vec::new();
+    let mut found_any = false;
 
     for depth in start_depth..=max_depth {
         let mut depth_paths = Vec::new();
@@ -113,6 +121,8 @@ pub fn find_paths(
         if !via.is_empty() {
             depth_paths.retain(|p| via_satisfied(p, via));
         }
+
+        let depth_found_something = !depth_paths.is_empty();
         results.extend(depth_paths);
 
         if results.len() >= MAX_PATHS {
@@ -121,6 +131,20 @@ pub fn find_paths(
                 has_more: depth < max_depth,
                 next_depth: depth + 1,
             };
+        }
+
+        // Stopping condition 3: if we've already found paths and this depth
+        // added nothing new, pause — no point exhausting all remaining levels.
+        if found_any && !depth_found_something {
+            return PathSearchResult {
+                paths: results,
+                has_more: depth < max_depth,
+                next_depth: depth + 1,
+            };
+        }
+
+        if depth_found_something {
+            found_any = true;
         }
     }
 
@@ -547,6 +571,22 @@ mod tests {
         for p in &r2.paths {
             assert!(p.steps.len() >= 3, "Resumed paths should be depth 3+");
         }
+    }
+
+    #[test]
+    fn test_early_stop_when_no_marginal_paths() {
+        // Schema with only a direct path: users → locations (depth 1).
+        // No depth-2+ paths exist, so after finding the depth-1 path the
+        // depth-2 search returns empty, triggering early pause.
+        let schema = schema_from(vec![
+            make_table("users", vec![("location_id", "locations", "id")]),
+            make_table("locations", vec![]),
+        ]);
+        let r = find_paths(&schema, "users", "locations", &[], 1, MAX_PATH_DEPTH);
+        assert_eq!(r.paths.len(), 1);
+        // Search should pause rather than exhausting all 10 depth levels.
+        assert!(r.has_more, "Search should pause early when no marginal paths found");
+        assert_eq!(r.next_depth, 3, "depth-2 was explored (found nothing), so next is 3");
     }
 
     #[test]
