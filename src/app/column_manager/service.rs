@@ -6,14 +6,14 @@ use super::widget::ColumnManagerWidget;
 /// Persistent service that owns all column visibility state.
 /// Always exists. The widget is a temporary interaction view
 /// created via `open_widget`.
-pub struct ColumnManagerService {
+pub struct ColumnManagerModule {
     default_visible: Vec<String>,
     default_visible_by_node: HashMap<String, Vec<String>>,
     visible: HashMap<String, Vec<String>>,
     order: HashMap<String, Vec<String>>,
 }
 
-impl ColumnManagerService {
+impl ColumnManagerModule {
     pub fn new(
         default_visible: Vec<String>,
         default_visible_by_node: HashMap<String, Vec<String>>,
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn register_uses_defaults() {
-        let mut mgr = ColumnManagerService::new(
+        let mut mgr = ColumnManagerModule::new(
             vec!["id".into(), "name".into()],
             HashMap::new(),
         );
@@ -134,7 +134,7 @@ mod tests {
         let mut per_node = HashMap::new();
         per_node.insert("users".to_string(), vec!["id".into(), "email".into()]);
 
-        let mut mgr = ColumnManagerService::new(vec!["id".into(), "name".into()], per_node);
+        let mut mgr = ColumnManagerModule::new(vec!["id".into(), "name".into()], per_node);
         mgr.register_node(&schema_node("users", &["id", "name", "email"]));
 
         assert_eq!(mgr.visible_columns("users"), &["id", "email"]);
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn register_ignores_missing_columns() {
-        let mut mgr = ColumnManagerService::new(
+        let mut mgr = ColumnManagerModule::new(
             vec!["id".into(), "nonexistent".into()],
             HashMap::new(),
         );
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn register_does_not_overwrite() {
-        let mut mgr = ColumnManagerService::new(vec!["id".into()], HashMap::new());
+        let mut mgr = ColumnManagerModule::new(vec!["id".into()], HashMap::new());
         mgr.register_node(&schema_node("users", &["id", "name"]));
         // Manually change visibility
         mgr.visible.insert("users".into(), vec!["name".into()]);
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn open_widget_builds_items() {
-        let mut mgr = ColumnManagerService::new(vec!["id".into()], HashMap::new());
+        let mut mgr = ColumnManagerModule::new(vec!["id".into()], HashMap::new());
         mgr.register_node(&schema_node("users", &["id", "name", "email"]));
 
         let widget = mgr.open_widget("users", &["id".into(), "name".into(), "email".into()]);
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn apply_widget_updates_state() {
-        let mut mgr = ColumnManagerService::new(vec!["id".into()], HashMap::new());
+        let mut mgr = ColumnManagerModule::new(vec!["id".into()], HashMap::new());
         mgr.register_node(&schema_node("users", &["id", "name"]));
 
         let mut widget = mgr.open_widget("users", &["id".into(), "name".into()]);
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn unknown_node_returns_empty() {
-        let mgr = ColumnManagerService::new(vec![], HashMap::new());
+        let mgr = ColumnManagerModule::new(vec![], HashMap::new());
         assert!(mgr.visible_columns("unknown").is_empty());
         assert!(mgr.column_order("unknown").is_empty());
     }

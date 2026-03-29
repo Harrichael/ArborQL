@@ -8,7 +8,7 @@ pub struct ColumnManagerItem {
 }
 
 /// Temporary TUI overlay state for the column manager interaction.
-/// Created by `ColumnManagerService::open_widget()`, lives while the overlay is open.
+/// Created by `ColumnManagerModule::open_widget()`, lives while the overlay is open.
 pub struct ColumnManagerWidget {
     pub table: String,
     pub items: Vec<ColumnManagerItem>,

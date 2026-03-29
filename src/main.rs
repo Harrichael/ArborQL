@@ -21,7 +21,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use rules::Completion;
 
 use std::io;
-use app::column_manager::service::ColumnManagerService;
+use app::column_manager::service::ColumnManagerModule;
 use app::model::SchemaNode;
 use connection_manager::{ConnectionManager, ConnectionType};
 use ui::app::{AppState, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, PALETTE_COMMANDS, VirtualFkField, VirtualFkForm};
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
     state.connections_summary = conn_mgr.connection_summaries(&saved_ids(&state));
     state.display_table_names = conn_mgr.display_table_names();
     state.display_name_map = conn_mgr.display_name_map();
-    state.column_manager = ColumnManagerService::new(defaults.columns.global, defaults.columns.per_table);
+    state.column_manager = ColumnManagerModule::new(defaults.columns.global, defaults.columns.per_table);
     // Register all known schema nodes with the column manager.
     for (_name, info) in &engine.schema.tables {
         state.column_manager.register_node(&SchemaNode::from_table_info(info));
