@@ -1,6 +1,10 @@
 use crate::engine::{flatten_tree, DataNode};
 use crate::rules::{completions_at, Completion};
-use crate::ui::app::{AppState, Mode, PALETTE_COMMANDS};
+use crate::app::tui::render::centered_rect;
+
+use super::state::AppState;
+use super::types::{Mode, PALETTE_COMMANDS};
+
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -13,7 +17,6 @@ use ratatui::{
 pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     let size = f.area();
 
-    // Layout: optional schema sidebar | data viewer | command bar at bottom
     let (schema_area, main_area) = if state.show_schema {
         let horiz = Layout::default()
             .direction(Direction::Horizontal)
@@ -24,8 +27,6 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
         (None, size)
     };
 
-    // Split main_area into data viewer + command bar.
-    // In Command mode and CommandSearch mode we use an extra row for hints/search.
     let cmd_height: u16 = if matches!(state.mode, Mode::Normal | Mode::Query | Mode::CommandPalette | Mode::CommandSearch { .. }) { 4 } else { 3 };
     let vert = Layout::default()
         .direction(Direction::Vertical)
@@ -35,24 +36,20 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     let viewer_area = vert[0];
     let cmd_area = vert[1];
 
-    // Render schema sidebar
     if let Some(area) = schema_area {
         render_schema(f, state, area);
     }
 
-    // Render data viewer
     render_data_viewer(f, state, roots, viewer_area);
-
-    // Render command bar
     render_command_bar(f, state, cmd_area);
 
-    // Render overlays
+    // Mode-based overlays
     match &state.mode {
         Mode::PathSelection => render_path_selection(f, state),
         _ => {}
     }
 
-    // Render error/info overlay
+    // Widget overlays
     if let Some(ref widget) = state.error_info {
         let color = if widget.is_error { Color::Red } else { Color::Green };
         let msg = if widget.is_error {
@@ -63,37 +60,30 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
         render_overlay_message(f, &msg, color);
     }
 
-    // Render confirm overlay
     if let Some(ref widget) = state.confirm {
         render_overlay_message(f, &widget.message, Color::Yellow);
     }
 
-    // Render column-add overlay
-    if state.column_add.is_some() {
-        render_column_add(f, state);
+    if let Some(ref mut widget) = state.column_add {
+        crate::app::column_manager::render::render(f, widget);
     }
 
-    // Render manuals overlay
     if let Some(ref mut widget) = state.manuals {
         crate::app::manuals_manager::render::render(f, widget);
     }
 
-    // Render rule reorder overlay
     if let Some(ref widget) = state.rules_reorder {
         crate::app::query_rules_manager::render::render(f, widget);
     }
 
-    // Render connection manager overlay
     if let Some(ref widget) = state.conn_manager {
         crate::app::connection_manager::render::render(f, widget);
     }
 
-    // Render virtual FK manager overlay
     if let Some(ref widget) = state.vfk_manager {
         crate::app::virtual_fk_manager::render::render(f, widget);
     }
 
-    // Render log viewer overlay
     if let Some(ref widget) = state.log_viewer {
         crate::app::log_viewer::render::render(f, widget);
     }
@@ -120,10 +110,8 @@ fn render_data_viewer(
     let flat = flatten_tree(roots);
     state.visible_row_count = flat.len();
 
-    // Subtract 2 for block borders and 2 for the column detail bar at the bottom.
     let inner_height = area.height.saturating_sub(4) as usize;
 
-    // Adjust scroll so the selected row is always visible
     if state.selected_row >= state.scroll_offset + inner_height {
         state.scroll_offset = state.selected_row + 1 - inner_height;
     }
@@ -175,7 +163,6 @@ fn render_data_viewer(
         })
         .collect();
 
-    // Show all columns for selected node
     let col_info = if !flat.is_empty() && state.selected_row < flat.len() {
         let (_, node) = flat[state.selected_row];
         let mut all_cols: Vec<String> = node.row.keys().cloned().collect();
@@ -204,7 +191,6 @@ fn render_data_viewer(
 
     let block = Block::default().title(title).borders(Borders::ALL);
 
-    // Split viewer into list + column detail
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -216,7 +202,6 @@ fn render_data_viewer(
     let list = List::new(items);
     f.render_widget(list, vert[0]);
 
-    // Column detail bar
     if !col_info.is_empty() {
         let detail = Paragraph::new(col_info)
             .style(Style::default().fg(Color::DarkGray))
@@ -236,12 +221,10 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(inner);
 
-        // Input line (empty in Normal mode, has text in Query mode)
         let cmd_para = Paragraph::new(state.input.as_str())
             .style(Style::default().fg(Color::White));
         f.render_widget(cmd_para, rows[0]);
 
-        // Completion hint line
         let completions = completions_at(&state.input, &state.completion_table_names(), &state.table_columns);
         if !completions.is_empty() {
             let hint = format_completions(&completions);
@@ -250,9 +233,8 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             f.render_widget(hint_para, rows[1]);
         }
 
-        // Show cursor on the input line.
         f.set_cursor_position((
-            area.x + 1 + state.cursor as u16, // +1 border
+            area.x + 1 + state.cursor as u16,
             area.y + 1,
         ));
     } else if state.mode == Mode::CommandPalette {
@@ -265,12 +247,10 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(inner);
 
-        // Input line with ":" prefix
         let cmd_para = Paragraph::new(format!(":{}", state.input))
             .style(Style::default().fg(Color::White));
         f.render_widget(cmd_para, rows[0]);
 
-        // Filtered command list
         let filter = state.input.to_lowercase();
         let filtered: Vec<(&str, &str, &str)> = PALETTE_COMMANDS.iter()
             .filter(|(name, key, _)| filter.is_empty() || name.starts_with(&filter) || *key == filter)
@@ -298,7 +278,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         }
 
         f.set_cursor_position((
-            area.x + 1 + 1 + state.cursor as u16, // +1 border, +1 for ":"
+            area.x + 1 + 1 + state.cursor as u16,
             area.y + 1,
         ));
     } else if let Mode::CommandSearch { ref query, match_cursor, .. } = state.mode {
@@ -314,7 +294,6 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(inner);
 
-        // Search prompt line
         let prompt = Paragraph::new(Line::from(vec![
             Span::styled("(reverse-i-search): ", Style::default().fg(Color::Yellow)),
             Span::styled(query.clone(), Style::default().fg(Color::White)),
@@ -322,8 +301,6 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         ]));
         f.render_widget(prompt, rows[0]);
 
-        // Matched command line – resolve the match once and reuse it for both
-        // the display text and the colour selection.
         let matched = state
             .command_history
             .search_reverse(query, match_cursor)
@@ -361,7 +338,6 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
     }
 }
 
-/// Format a list of completions into a single hint string, capped at 8 items.
 fn format_completions(completions: &[Completion]) -> String {
     const MAX_SHOW: usize = 8;
     let total = completions.len();
@@ -406,8 +382,6 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
             };
 
             if selected {
-                // Build a multi-line item: summary on first line, then one
-                // line per step showing the full column-level detail.
                 let mut lines = vec![Line::styled(format!(" {}", p), summary_style)];
                 for step in &p.steps {
                     let detail = format!(
@@ -452,13 +426,7 @@ fn render_path_selection(f: &mut Frame, state: &AppState) {
     f.render_widget(list, area);
 }
 
-fn render_column_add(f: &mut Frame, state: &mut AppState) {
-    if let Some(ref mut widget) = state.column_add {
-        crate::app::column_manager::render::render(f, widget);
-    }
-}
-
-fn render_overlay_message(f: &mut Frame, message: &str, color: Color) {
+pub fn render_overlay_message(f: &mut Frame, message: &str, color: Color) {
     let area = centered_rect(60, 20, f.area());
     f.render_widget(Clear, area);
     let para = Paragraph::new(message)
@@ -471,11 +439,3 @@ fn render_overlay_message(f: &mut Frame, message: &str, color: Color) {
         .wrap(Wrap { trim: true });
     f.render_widget(para, area);
 }
-
-
-
-/// Compute a centered rect that is `percent_x`% wide and `percent_y`% tall.
-// Shared render utilities re-exported from ui::model::render.
-use crate::ui::model::render::{centered_rect, render_search_bar};
-
-

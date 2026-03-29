@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::config::SavedConnection;
 use crate::connection_manager::{ConnectionSummary, ConnectionType};
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnManagerView {

@@ -5,7 +5,7 @@ use ratatui::{
 };
 
 use super::widget::RulesWidget;
-use crate::ui::model::render::centered_rect;
+use crate::app::tui::render::centered_rect;
 
 pub fn render(f: &mut Frame, widget: &RulesWidget) {
     let area = centered_rect(60, 50, f.area());

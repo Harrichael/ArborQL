@@ -1,6 +1,6 @@
 use super::widget::{ManualsView, ManualsWidget, MANUALS};
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::FocusLoci;
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::FocusLoci;
 
 impl ControlPanel for ManualsWidget {
     fn focus_loci(&self) -> FocusLoci {
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn focus_loci_is_overlay() {
-        use crate::ui::model::keys::{EntityFocus, InputFocus};
+        use crate::app::tui::keys::{EntityFocus, InputFocus};
         let w = ManualsWidget::new();
         let f = w.focus_loci();
         assert_eq!(f.input, InputFocus::None);

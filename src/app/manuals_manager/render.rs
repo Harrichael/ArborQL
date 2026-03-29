@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::widget::{ManualsView, ManualsWidget, MANUALS};
-use crate::ui::model::render::centered_rect;
+use crate::app::tui::render::centered_rect;
 
 pub fn render(f: &mut Frame, widget: &mut ManualsWidget) {
     match widget.view {

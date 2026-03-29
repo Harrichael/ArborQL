@@ -4,9 +4,9 @@ use crossterm::event::KeyEvent;
 use crate::app::connection_manager::widget::ConnManagerAction;
 use crate::app::virtual_fk_manager::widget::VfkAction;
 use crate::config;
-use crate::ui::app::ConfirmAction;
-use crate::ui::model::control_panel::{dispatch, ControlPanel};
-use crate::ui::model::keys::from_key_event;
+use super::types::ConfirmAction;
+use crate::app::tui::control_panel::{dispatch, ControlPanel};
+use crate::app::tui::keys::from_key_event;
 
 use super::module::{query_type_options, refresh_schema_from_conn_mgr, saved_ids};
 use super::{DataPlayground, TickResult};
@@ -144,7 +144,7 @@ pub(super) async fn dispatch_widgets(
                             w.view = crate::app::connection_manager::widget::ConnManagerView::Tabs;
                             w.tab = crate::app::connection_manager::widget::ConnManagerTab::Connections;
                             w.cursor = conn_mgr.connections.len().saturating_sub(1);
-                            w.focus.input = crate::ui::model::keys::InputFocus::None;
+                            w.focus.input = crate::app::tui::keys::InputFocus::None;
                         }
                     }
                 }

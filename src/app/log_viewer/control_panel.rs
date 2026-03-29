@@ -1,6 +1,6 @@
 use super::widget::LogViewerWidget;
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::FocusLoci;
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::FocusLoci;
 
 impl ControlPanel for LogViewerWidget {
     fn focus_loci(&self) -> FocusLoci {
@@ -28,7 +28,7 @@ impl ControlPanel for LogViewerWidget {
 mod tests {
     use super::*;
     use crate::log::{LogEntry, LogLevel};
-    use crate::ui::model::keys::{EntityFocus, InputFocus};
+    use crate::app::tui::keys::{EntityFocus, InputFocus};
 
     fn entry(msg: &str) -> LogEntry {
         LogEntry { level: LogLevel::Info, message: msg.to_string(), timestamp: 0 }

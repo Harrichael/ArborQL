@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use super::widget::LogViewerWidget;
-use crate::ui::model::render::centered_rect;
+use crate::app::tui::render::centered_rect;
 
 pub fn render(f: &mut Frame, widget: &LogViewerWidget) {
     let area = centered_rect(80, 70, f.area());

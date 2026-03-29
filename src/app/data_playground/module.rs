@@ -13,7 +13,7 @@ use crate::engine::Engine;
 use crate::log;
 use crate::rules;
 use crate::engine;
-use crate::ui::app::AppState;
+use super::state::AppState;
 
 use super::{DataPlayground, TickResult};
 
@@ -36,7 +36,7 @@ impl DataPlayground {
 
     /// Render the current state to the given frame.
     pub fn render(&mut self, f: &mut ratatui::Frame) {
-        crate::ui::render::render(f, &mut self.state, &self.engine.roots);
+        super::render::render(f, &mut self.state, &self.engine.roots);
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<TickResult> {
@@ -232,7 +232,7 @@ pub(super) async fn execute_command(
                     state.paths_has_more = result.has_more;
                     state.paths_next_depth = result.next_depth;
                     state.path_cursor = 0;
-                    state.mode = crate::ui::app::Mode::PathSelection;
+                    state.mode = super::types::Mode::PathSelection;
                     *pending_paths = Some((rule, result.paths));
                 }
             }

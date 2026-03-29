@@ -4,8 +4,8 @@ use super::widget::{
     VfkAction, VfkView, VfkWidget, VirtualFkField, VirtualFkForm,
 };
 use crate::schema::VirtualFkDef;
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::{FocusLoci, InputFocus};
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::{FocusLoci, InputFocus};
 
 impl ControlPanel for VfkWidget {
     fn focus_loci(&self) -> FocusLoci {
@@ -278,7 +278,7 @@ impl ControlPanel for VfkWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::model::keys::EntityFocus;
+    use crate::app::tui::keys::EntityFocus;
     use std::collections::HashMap;
 
     fn empty_widget() -> VfkWidget {

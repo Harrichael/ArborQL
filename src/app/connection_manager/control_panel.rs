@@ -5,8 +5,8 @@ use super::widget::{
     ConnectionForm,
 };
 use crate::connection_manager::ConnectionType;
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 impl ControlPanel for ConnManagerWidget {
     fn focus_loci(&self) -> FocusLoci {

@@ -8,7 +8,7 @@ use crate::config;
 use crate::db;
 use crate::engine::{self, flatten_tree};
 use crate::rules::{self, Completion};
-use crate::ui::app::{Mode, PALETTE_COMMANDS};
+use super::types::{Mode, PALETTE_COMMANDS};
 
 use super::module::{
     columns_for_table, execute_command, insert_rule_at_next_cursor, saved_ids, toggle_fold,

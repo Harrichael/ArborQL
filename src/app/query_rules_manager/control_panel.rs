@@ -1,6 +1,6 @@
 use super::widget::RulesWidget;
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::FocusLoci;
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::FocusLoci;
 
 fn push_undo(w: &mut RulesWidget) {
     w.undo.push((w.rules.clone(), w.cursor, w.next_cursor));
@@ -94,7 +94,7 @@ impl ControlPanel for RulesWidget {
 mod tests {
     use super::*;
     use crate::rules::Rule;
-    use crate::ui::model::keys::{EntityFocus, InputFocus};
+    use crate::app::tui::keys::{EntityFocus, InputFocus};
 
     fn filter_rule(table: &str) -> Rule {
         Rule::Filter {

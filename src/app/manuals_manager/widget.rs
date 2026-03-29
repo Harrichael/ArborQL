@@ -1,4 +1,4 @@
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 /// Embedded manuals: (title, content).
 pub const MANUALS: &[(&str, &str)] = &[

@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use super::widget::{VfkView, VfkWidget, VirtualFkField, vfk_display_string};
-use crate::ui::model::keys::InputFocus;
-use crate::ui::model::render::{centered_rect, render_search_bar};
+use crate::app::tui::keys::InputFocus;
+use crate::app::tui::render::{centered_rect, render_search_bar};
 
 pub fn render(f: &mut Frame, widget: &VfkWidget) {
     match widget.view {

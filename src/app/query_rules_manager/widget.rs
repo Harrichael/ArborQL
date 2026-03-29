@@ -1,5 +1,5 @@
 use crate::rules::Rule;
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 pub struct RulesWidget {
     pub rules: Vec<Rule>,

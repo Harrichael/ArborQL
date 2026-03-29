@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ui::model::keys::{EntityFocus, InputFocus, FocusLoci};
+use crate::app::tui::keys::{EntityFocus, InputFocus, FocusLoci};
 
 /// Working item in the column manager overlay.
 #[derive(Debug, Clone)]

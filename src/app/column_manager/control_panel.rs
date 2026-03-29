@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::widget::ColumnManagerWidget;
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::{InputFocus, FocusLoci};
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::{InputFocus, FocusLoci};
 
 /// Move cursor left by one char boundary.
 fn move_left(s: &str, cursor: usize) -> usize {
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn focus_loci_lifecycle() {
-        use crate::ui::model::keys::EntityFocus;
+        use crate::app::tui::keys::EntityFocus;
         let mut p = widget(&["id"]);
 
         // Default: no input, editable entity

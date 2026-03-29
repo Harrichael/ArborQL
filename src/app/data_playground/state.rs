@@ -3,48 +3,7 @@ use crate::engine::TablePath;
 use crate::schema::VirtualFkDef;
 use std::collections::HashMap;
 
-/// Commands available in the command palette (`:` key).
-/// Each entry is (name, shortcut key or "", description).
-pub const PALETTE_COMMANDS: &[(&str, &str, &str)] = &[
-    ("connections", "+", "Connection manager"),
-    ("columns",     "c", "Column Manager"),
-    ("lattice",     "v", "Manage virtual lattice keys"),
-    ("rules",       "r", "Query Rules"),
-    ("prune",       "x", "Remove selected node from Data Playground"),
-    ("manuals",     "m", "Browse manuals"),
-    ("logs",        "l", "View log messages"),
-    ("quit",        "q", "Exit application"),
-    ("schema",      "s", "Toggle schema sidebar"),
-];
-
-/// All possible modes the UI can be in.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Mode {
-    /// Normal navigation mode — also shows the query bar (ready for input).
-    Normal,
-    /// User is typing a query (rule).
-    Query,
-    /// User is browsing the command palette (`:` key).
-    CommandPalette,
-    /// User is being asked to pick among multiple paths.
-    PathSelection,
-    /// User is doing a reverse-i-search through command history.
-    CommandSearch {
-        /// The search query typed so far.
-        query: String,
-        /// How many times Ctrl+R has been pressed to scan further back.
-        match_cursor: usize,
-        /// Input buffer saved before entering search mode (restored on Esc).
-        saved_input: String,
-    },
-}
-
-/// Actions that can follow a confirmation dialog.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConfirmAction {
-    /// Save a single connection — user decides whether to include the password.
-    SaveConnectionWithPassword { conn_index: usize },
-}
+use super::types::Mode;
 
 /// Application state, passed to the renderer.
 pub struct AppState {
@@ -90,9 +49,9 @@ pub struct AppState {
     /// Log viewer overlay state, if open.
     pub log_viewer: Option<crate::app::log_viewer::widget::LogViewerWidget>,
     /// Error/Info message overlay, if open.
-    pub error_info: Option<crate::app::data_playground::widgets::error_info::ErrorInfoWidget>,
+    pub error_info: Option<super::widgets::error_info::ErrorInfoWidget>,
     /// Confirmation dialog overlay, if open.
-    pub confirm: Option<crate::app::data_playground::widgets::confirm::ConfirmWidget>,
+    pub confirm: Option<super::widgets::confirm::ConfirmWidget>,
     /// Virtual FK definitions managed by the user.
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
@@ -107,8 +66,7 @@ pub struct AppState {
     pub command_history: CommandHistory,
     /// Index into `command_history` while browsing with Up/Down (None = not browsing).
     pub history_cursor: Option<usize>,
-    /// Input buffer saved when the user first enters history-browsing mode
-    /// (restored when they press Down past the most recent entry).
+    /// Input buffer saved when the user first enters history-browsing mode.
     pub history_draft: String,
     /// Connection summaries for the connection manager overlay.
     pub connections_summary: Vec<crate::connection_manager::ConnectionSummary>,
@@ -116,7 +74,7 @@ pub struct AppState {
     pub saved_connections: Vec<crate::config::SavedConnection>,
     /// Fully-qualified table names for display (always prefixed when multi-connection).
     pub display_table_names: Vec<String>,
-    /// Maps engine table names to display-qualified names (e.g. "users" → "ecommerce.users").
+    /// Maps engine table names to display-qualified names.
     pub display_name_map: HashMap<String, String>,
 }
 
@@ -161,8 +119,6 @@ impl AppState {
         }
     }
 
-    /// Return table names for command completion: includes both engine names
-    /// and display-qualified names (deduplicated, sorted).
     pub fn completion_table_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.table_names.clone();
         for dn in &self.display_table_names {
@@ -174,7 +130,6 @@ impl AppState {
         names
     }
 
-    /// Return the display-qualified form of a table name.
     pub fn display_name<'a>(&'a self, table: &'a str) -> &'a str {
         self.display_name_map
             .get(table)
@@ -182,7 +137,6 @@ impl AppState {
             .unwrap_or(table)
     }
 
-    /// Move selection up.
     pub fn select_up(&mut self) {
         if self.selected_row > 0 {
             self.selected_row -= 1;
@@ -190,7 +144,6 @@ impl AppState {
         }
     }
 
-    /// Move selection down.
     pub fn select_down(&mut self) {
         if self.selected_row + 1 < self.visible_row_count {
             self.selected_row += 1;
@@ -199,19 +152,16 @@ impl AppState {
     }
 
     fn clamp_scroll(&mut self) {
-        // Keep selected row visible
         if self.selected_row < self.scroll_offset {
             self.scroll_offset = self.selected_row;
         }
     }
 
-    /// Insert a character at the cursor.
     pub fn input_char(&mut self, ch: char) {
         self.input.insert(self.cursor, ch);
         self.cursor += 1;
     }
 
-    /// Delete character before cursor.
     pub fn input_backspace(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
@@ -219,7 +169,6 @@ impl AppState {
         }
     }
 
-    /// Delete character at cursor.
     pub fn input_delete(&mut self) {
         if self.cursor < self.input.len() {
             self.input.remove(self.cursor);
@@ -238,16 +187,11 @@ impl AppState {
         }
     }
 
-    /// Clear the input buffer.
     pub fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;
     }
 
-    /// Navigate to an older history entry (Up arrow behaviour in Command mode).
-    ///
-    /// Saves the current draft input on the first call so it can be restored
-    /// with [`history_down`] later.
     pub fn history_up(&mut self) {
         let len = self.command_history.len();
         if len == 0 {
@@ -265,15 +209,13 @@ impl AppState {
                 self.input = self.command_history.entries()[i - 1].text.clone();
                 self.cursor = self.input.len();
             }
-            _ => {} // already at oldest entry
+            _ => {}
         }
     }
 
-    /// Navigate to a newer history entry, or restore the saved draft when the
-    /// user moves past the most recent entry (Down arrow behaviour in Command mode).
     pub fn history_down(&mut self) {
         match self.history_cursor {
-            None => {} // not currently browsing history
+            None => {}
             Some(i) => {
                 let len = self.command_history.len();
                 if i + 1 < len {
@@ -281,7 +223,6 @@ impl AppState {
                     self.input = self.command_history.entries()[i + 1].text.clone();
                     self.cursor = self.input.len();
                 } else {
-                    // Past the end: restore the draft the user was typing.
                     self.history_cursor = None;
                     self.input = self.history_draft.clone();
                     self.cursor = self.input.len();
@@ -290,15 +231,12 @@ impl AppState {
         }
     }
 
-    /// Clear overlay search state (call when opening/closing a list overlay).
     pub fn reset_overlay_search(&mut self) {
         self.overlay_search.clear();
         self.overlay_search_active = false;
         self.overlay_scroll = 0;
     }
 
-
-    /// Get text entered so far.
     pub fn input_text(&self) -> &str {
         &self.input
     }

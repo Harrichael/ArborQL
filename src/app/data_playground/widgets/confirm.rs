@@ -1,6 +1,6 @@
-use crate::ui::app::ConfirmAction;
-use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::data_playground::types::ConfirmAction;
+use crate::app::tui::control_panel::ControlPanel;
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 /// Widget for a Yes/No confirmation dialog.
 pub struct ConfirmWidget {

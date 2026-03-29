@@ -1,5 +1,5 @@
 use crate::log::LogEntry;
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 pub struct LogViewerWidget {
     pub logs: Vec<LogEntry>,

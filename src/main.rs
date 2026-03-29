@@ -7,7 +7,6 @@ mod engine;
 mod log;
 mod rules;
 mod schema;
-mod ui;
 
 use anyhow::Result;
 use clap::Parser;

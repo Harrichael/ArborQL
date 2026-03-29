@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::widget::{ConnManagerTab, ConnManagerView, ConnManagerWidget};
 use crate::connection_manager::{ConnectionStatus, ConnectionType};
-use crate::ui::model::render::centered_rect;
+use crate::app::tui::render::centered_rect;
 
 pub fn render(f: &mut Frame, widget: &ConnManagerWidget) {
     match widget.view {

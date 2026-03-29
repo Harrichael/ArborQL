@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::schema::VirtualFkDef;
-use crate::ui::model::keys::{EntityFocus, FocusLoci, InputFocus};
+use crate::app::tui::keys::{EntityFocus, FocusLoci, InputFocus};
 
 /// Which field is active in the virtual FK creation form.
 #[derive(Debug, Clone, PartialEq)]
