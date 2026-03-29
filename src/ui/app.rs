@@ -116,8 +116,6 @@ pub struct AppState {
     /// Input buffer saved when the user first enters history-browsing mode
     /// (restored when they press Down past the most recent entry).
     pub history_draft: String,
-    /// Set to true by the key handler to request a Ctrl+Z terminal suspend.
-    pub should_suspend: bool,
     /// Connection summaries for the connection manager overlay.
     pub connections_summary: Vec<crate::connection_manager::ConnectionSummary>,
     /// Saved connection configs from the config file.
@@ -160,7 +158,6 @@ impl AppState {
             command_history: CommandHistory::new(),
             history_cursor: None,
             history_draft: String::new(),
-            should_suspend: false,
             connections_summary: Vec::new(),
             saved_connections: Vec::new(),
             display_table_names: Vec::new(),

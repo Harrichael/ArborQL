@@ -1,4 +1,5 @@
 pub mod column_manager;
+pub mod data_playground;
 pub mod connection_manager;
 pub mod log_viewer;
 pub mod manuals_manager;
