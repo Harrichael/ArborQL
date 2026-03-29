@@ -25,7 +25,8 @@ use app::column_manager::module::ColumnManagerModule;
 use app::model::SchemaNode;
 use connection_manager::{ConnectionManager, ConnectionType};
 use app::connection_manager::widget::{ConnManagerAction, ConnManagerWidget};
-use ui::app::{AppState, ConfirmAction, Mode, PALETTE_COMMANDS, VirtualFkField, VirtualFkForm};
+use app::virtual_fk_manager::widget::{VfkAction, VfkWidget};
+use ui::app::{AppState, ConfirmAction, Mode, PALETTE_COMMANDS};
 use ui::model::control_panel::{dispatch, ControlPanel};
 use ui::model::keys::from_key_event;
 use schema::VirtualFkDef;
@@ -435,6 +436,64 @@ async fn handle_key(
         }
     }
 
+    // Virtual FK manager overlay has exclusive key handling while open.
+    if state.vfk_manager.is_some() {
+        if let Some(ref mut widget) = state.vfk_manager {
+            if let Some(event) = from_key_event(key, &widget.focus_loci()) {
+                dispatch(widget, event);
+            }
+        }
+        let action = state.vfk_manager.as_mut()
+            .map(|w| std::mem::replace(&mut w.action, VfkAction::None))
+            .unwrap_or(VfkAction::None);
+        match action {
+            VfkAction::None => {}
+            VfkAction::QueryTypeOptions { table, column } => {
+                let options = query_type_options(conn_mgr, &table, &column).await;
+                if let Some(ref mut w) = state.vfk_manager {
+                    if let Some(ref mut form) = w.form {
+                        form.type_options = options;
+                    }
+                }
+            }
+            VfkAction::AddToEngine(vfk) => {
+                state.virtual_fks.push(vfk.clone());
+                engine.schema.virtual_fks.push(vfk);
+                if let Some(ref mut w) = state.vfk_manager {
+                    w.virtual_fks = state.virtual_fks.clone();
+                    w.cursor = w.virtual_fks.len().saturating_sub(1);
+                }
+            }
+            VfkAction::RemoveFromEngine(idx) => {
+                if idx < state.virtual_fks.len() {
+                    let removed = state.virtual_fks.remove(idx);
+                    engine.schema.virtual_fks.retain(|v| v != &removed);
+                }
+                if let Some(ref mut w) = state.vfk_manager {
+                    w.virtual_fks = state.virtual_fks.clone();
+                }
+            }
+            VfkAction::SaveToConfig => {
+                match config::save_virtual_fks(&state.virtual_fks) {
+                    Ok(path) => {
+                        state.vfk_manager = None;
+                        state.mode = Mode::Info(format!("Virtual FKs saved to {}", path.display()));
+                    }
+                    Err(e) => {
+                        state.vfk_manager = None;
+                        state.mode = Mode::Error(format!("Save failed: {}", e));
+                    }
+                }
+            }
+        }
+        if state.vfk_manager.as_ref().map_or(false, |w| w.closed) {
+            state.vfk_manager = None;
+        }
+        if state.vfk_manager.is_some() {
+            return Ok(true);
+        }
+    }
+
     // The ConnectionManager implements Database, so we can use it as &dyn Database.
     // Placed after overlay handlers because those need &mut conn_mgr.
     let db: &dyn db::Database = conn_mgr;
@@ -688,8 +747,11 @@ async fn handle_key(
                             state.mode = Mode::Normal;
                         }
                         Some("lattice") => {
-                            state.reset_overlay_search();
-                            state.mode = Mode::VirtualFkManager { cursor: 0 };
+                            state.vfk_manager = Some(VfkWidget::new(
+                                state.virtual_fks.clone(),
+                                state.display_table_names.clone(),
+                                state.table_columns.clone(),
+                            ));
                         }
                         Some("rules") => {
                             if !engine.rules.is_empty() {
@@ -852,347 +914,6 @@ async fn handle_key(
             }
         }
 
-        // ── Virtual FK manager ───────────────────────────────────────────
-        Mode::VirtualFkManager { cursor } => {
-            let filtered: Vec<usize> = {
-                let q = state.overlay_search.to_lowercase();
-                state.virtual_fks.iter().enumerate()
-                    .filter(|(_, vfk)| q.is_empty() || vfk.from_table.to_lowercase().contains(&q) || vfk.to_table.to_lowercase().contains(&q) || vfk.type_value.as_deref().unwrap_or("").to_lowercase().contains(&q))
-                    .map(|(i, _)| i)
-                    .collect()
-            };
-            match key.code {
-                // Navigation always fires
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if cursor > 0 { state.mode = Mode::VirtualFkManager { cursor: cursor - 1 }; }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let max = filtered.len().saturating_sub(1);
-                    if cursor < max { state.mode = Mode::VirtualFkManager { cursor: cursor + 1 }; }
-                }
-                KeyCode::Char('a') => {
-                    state.reset_overlay_search();
-                    state.mode = Mode::VirtualFkAdd(VirtualFkForm::new());
-                }
-                KeyCode::Char('d') | KeyCode::Char('x') if !state.overlay_search_active => {
-                    if let Some(&orig_idx) = filtered.get(cursor) {
-                        let removed = state.virtual_fks.remove(orig_idx);
-                        engine.schema.virtual_fks.retain(|v| v != &removed);
-                        let new_cursor = cursor.saturating_sub(if cursor >= filtered.len().saturating_sub(1) { 1 } else { 0 });
-                        state.mode = Mode::VirtualFkManager { cursor: new_cursor };
-                    }
-                }
-                KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                    match config::save_virtual_fks(&state.virtual_fks) {
-                        Ok(path) => { state.mode = Mode::Info(format!("Virtual FKs saved to {}", path.display())); }
-                        Err(e) => { state.mode = Mode::Error(format!("Save failed: {}", e)); }
-                    }
-                }
-                // Activate search
-                KeyCode::Char('/') if !state.overlay_search_active => {
-                    state.overlay_search_active = true;
-                }
-                // Esc: 3-level exit
-                KeyCode::Esc => {
-                    if state.overlay_search_active {
-                        state.overlay_search_active = false;
-                    } else if !state.overlay_search.is_empty() {
-                        state.overlay_search.clear();
-                        state.overlay_scroll = 0;
-                        state.mode = Mode::VirtualFkManager { cursor: 0 };
-                    } else {
-                        state.reset_overlay_search();
-                        state.mode = Mode::Normal;
-                    }
-                }
-                // Search input when active
-                KeyCode::Backspace if state.overlay_search_active => {
-                    state.overlay_search.pop();
-                    state.overlay_scroll = 0;
-                    state.mode = Mode::VirtualFkManager { cursor: 0 };
-                }
-                KeyCode::Char(c) if state.overlay_search_active => {
-                    state.overlay_search.push(c);
-                    state.overlay_scroll = 0;
-                    state.mode = Mode::VirtualFkManager { cursor: 0 };
-                }
-                _ => {}
-            }
-        }
-
-        // ── Virtual FK creation form ────────────────────────────────────
-        Mode::VirtualFkAdd(ref form_state) => {
-            let form = form_state.clone();
-
-            // Helper macro: build filtered original-indices for a slice
-            macro_rules! filtered_indices {
-                ($items:expr) => {{
-                    let q = state.overlay_search.to_lowercase();
-                    $items.iter().enumerate()
-                        .filter(|(_, s)| q.is_empty() || s.to_lowercase().contains(&q))
-                        .map(|(i, _)| i)
-                        .collect::<Vec<_>>()
-                }};
-            }
-
-            // Build the dropdown items for the currently active field.
-            let dropdown_items: Vec<String> = match &form.active_field {
-                VirtualFkField::FromTable | VirtualFkField::ToTable => state.display_table_names.clone(),
-                VirtualFkField::IdColumn => {
-                    state.table_columns.get(&form.from_table).cloned().unwrap_or_default()
-                }
-                VirtualFkField::TypeColumn => {
-                    let mut cols = vec!["(none — simple FK)".to_string()];
-                    cols.extend(state.table_columns.get(&form.from_table).cloned().unwrap_or_default());
-                    cols
-                }
-                VirtualFkField::TypeValue => {
-                    if form.type_column.is_empty() {
-                        vec!["(no type_column set — skipping)".to_string()]
-                    } else {
-                        form.type_options.iter().map(|(v, c)| format!("{}  ({})", v, c)).collect()
-                    }
-                }
-                VirtualFkField::ToColumn => {
-                    state.table_columns.get(&form.to_table).cloned().unwrap_or_default()
-                }
-            };
-
-            match key.code {
-                // ── Tab: advance to next field ─────────────────────────
-                KeyCode::Tab => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        let next = f.active_field.next(f.type_column.is_empty());
-                        f.active_field = next;
-                        f.cursor = 0;
-                    }
-                    state.overlay_search.clear();
-                    state.overlay_search_active = false;
-                    state.overlay_scroll = 0;
-                    // Pre-select "id" when switching to ToColumn
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        if f.active_field == VirtualFkField::ToColumn {
-                            let to_cols = state.table_columns.get(&f.to_table).cloned().unwrap_or_default();
-                            f.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
-                        }
-                    }
-                    // Load type options when switching to TypeValue
-                    if let Mode::VirtualFkAdd(f) = &state.mode {
-                        if f.active_field == VirtualFkField::TypeValue && !f.type_column.is_empty() {
-                            let tc = f.type_column.clone();
-                            let ft = f.from_table.clone();
-                            let options = query_type_options(db, &ft, &tc).await;
-                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                f.type_options = options;
-                            }
-                        }
-                    }
-                }
-
-                // ── Shift+Tab: go to previous field ───────────────────
-                KeyCode::BackTab => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        let prev = f.active_field.prev(f.type_column.is_empty());
-                        f.active_field = prev;
-                        f.cursor = 0;
-                    }
-                    state.overlay_search.clear();
-                    state.overlay_search_active = false;
-                    state.overlay_scroll = 0;
-                    // Load type options when switching back to TypeValue
-                    if let Mode::VirtualFkAdd(f) = &state.mode {
-                        if f.active_field == VirtualFkField::TypeValue && !f.type_column.is_empty() {
-                            let tc = f.type_column.clone();
-                            let ft = f.from_table.clone();
-                            let options = query_type_options(db, &ft, &tc).await;
-                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                f.type_options = options;
-                            }
-                        }
-                    }
-                }
-
-                // ── Up/Down: navigate the active dropdown ──────────────
-                // Arrow keys always navigate regardless of search state.
-                // 'k'/'j' only navigate when search input is not active
-                // (when search is active they fall through to the Char(c) handler).
-                KeyCode::Up => {
-                    let c = state.wizard_cursor();
-                    if c > 0 { state.wizard_set_cursor(c - 1); }
-                }
-                KeyCode::Char('k') if !state.overlay_search_active => {
-                    let c = state.wizard_cursor();
-                    if c > 0 { state.wizard_set_cursor(c - 1); }
-                }
-                KeyCode::Down => {
-                    let fi = filtered_indices!(dropdown_items);
-                    let c = state.wizard_cursor();
-                    if c + 1 < fi.len() { state.wizard_set_cursor(c + 1); }
-                }
-                KeyCode::Char('j') if !state.overlay_search_active => {
-                    let fi = filtered_indices!(dropdown_items);
-                    let c = state.wizard_cursor();
-                    if c + 1 < fi.len() { state.wizard_set_cursor(c + 1); }
-                }
-
-                // ── / : activate search ───────────────────────────────
-                KeyCode::Char('/') if !state.overlay_search_active => {
-                    state.overlay_search_active = true;
-                }
-
-                // ── Esc: 3-level exit ─────────────────────────────────
-                KeyCode::Esc => {
-                    if state.overlay_search_active {
-                        state.overlay_search_active = false;
-                    } else if !state.overlay_search.is_empty() {
-                        state.overlay_search.clear();
-                        state.overlay_scroll = 0;
-                        state.wizard_set_cursor(0);
-                    } else {
-                        state.reset_overlay_search();
-                        state.mode = Mode::VirtualFkManager { cursor: 0 };
-                    }
-                }
-
-                // ── Enter: confirm selection for active field ─────────
-                KeyCode::Enter => {
-                    let fi = filtered_indices!(dropdown_items);
-                    if let Some(&orig) = fi.get(form.cursor) {
-                        if let Some(raw_value) = dropdown_items.get(orig) {
-                            let raw_value = raw_value.clone();
-                            state.reset_overlay_search();
-
-                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                match &f.active_field {
-                                    VirtualFkField::FromTable => {
-                                        f.from_table = raw_value;
-                                        // Reset dependent fields when source table changes
-                                        f.id_column.clear();
-                                        f.type_column.clear();
-                                        f.type_value.clear();
-                                        f.active_field = VirtualFkField::IdColumn;
-                                        f.cursor = 0;
-                                    }
-                                    VirtualFkField::IdColumn => {
-                                        f.id_column = raw_value;
-                                        f.active_field = VirtualFkField::TypeColumn;
-                                        f.cursor = 0;
-                                    }
-                                    VirtualFkField::TypeColumn => {
-                                        if raw_value.starts_with("(none") {
-                                            f.type_column.clear();
-                                            f.type_value.clear();
-                                            // Skip TypeValue — jump straight to ToTable
-                                            f.active_field = VirtualFkField::ToTable;
-                                        } else {
-                                            f.type_column = raw_value;
-                                            f.active_field = VirtualFkField::TypeValue;
-                                        }
-                                        f.cursor = 0;
-                                    }
-                                    VirtualFkField::TypeValue => {
-                                        if !raw_value.starts_with("(no type_column") {
-                                            // Strip the "  (count)" suffix
-                                            let tv = raw_value
-                                                .split("  (")
-                                                .next()
-                                                .unwrap_or(&raw_value)
-                                                .to_string();
-                                            f.type_value = tv;
-                                        }
-                                        f.active_field = VirtualFkField::ToTable;
-                                        f.cursor = 0;
-                                    }
-                                    VirtualFkField::ToTable => {
-                                        f.to_table = raw_value;
-                                        f.to_column.clear();
-                                        // Pre-select "id" column if it exists
-                                        let to_cols = state.table_columns
-                                            .get(&f.to_table).cloned().unwrap_or_default();
-                                        f.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
-                                        f.active_field = VirtualFkField::ToColumn;
-                                    }
-                                    VirtualFkField::ToColumn => {
-                                        f.to_column = raw_value;
-                                        // Commit when all required fields are filled
-                                        if f.is_complete() {
-                                            let vfk = VirtualFkDef {
-                                                from_table: f.from_table.clone(),
-                                                type_column: if f.type_column.is_empty() { None } else { Some(f.type_column.clone()) },
-                                                type_value: if f.type_value.is_empty() { None } else { Some(f.type_value.clone()) },
-                                                id_column: f.id_column.clone(),
-                                                to_table: f.to_table.clone(),
-                                                to_column: f.to_column.clone(),
-                                            };
-                                            state.virtual_fks.push(vfk.clone());
-                                            engine.schema.virtual_fks.push(vfk);
-                                            state.reset_overlay_search();
-                                            state.mode = Mode::VirtualFkManager {
-                                                cursor: state.virtual_fks.len().saturating_sub(1),
-                                            };
-                                            return Ok(true);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Load type options when switching to TypeValue
-                            if let Mode::VirtualFkAdd(f) = &state.mode {
-                                if f.active_field == VirtualFkField::TypeValue
-                                    && !f.type_column.is_empty()
-                                {
-                                    let tc = f.type_column.clone();
-                                    let ft = f.from_table.clone();
-                                    let options = query_type_options(db, &ft, &tc).await;
-                                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                        f.type_options = options;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // ── Ctrl+S: commit + save when form is complete ────────
-                KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                    if form.is_complete() {
-                        let vfk = VirtualFkDef {
-                            from_table: form.from_table.clone(),
-                            type_column: if form.type_column.is_empty() { None } else { Some(form.type_column.clone()) },
-                            type_value: if form.type_value.is_empty() { None } else { Some(form.type_value.clone()) },
-                            id_column: form.id_column.clone(),
-                            to_table: form.to_table.clone(),
-                            to_column: form.to_column.clone(),
-                        };
-                        state.virtual_fks.push(vfk.clone());
-                        engine.schema.virtual_fks.push(vfk);
-                        match config::save_virtual_fks(&state.virtual_fks) {
-                            Ok(path) => {
-                                state.reset_overlay_search();
-                                state.mode = Mode::Info(format!("Virtual FK saved to {}", path.display()));
-                            }
-                            Err(e) => {
-                                state.mode = Mode::Error(format!("Save failed: {}", e));
-                            }
-                        }
-                    }
-                }
-
-                // ── Search input: printable chars when active ──────────
-                KeyCode::Backspace if state.overlay_search_active => {
-                    state.overlay_search.pop();
-                    state.overlay_scroll = 0;
-                    state.wizard_set_cursor(0);
-                }
-                KeyCode::Char(c) if state.overlay_search_active => {
-                    state.overlay_search.push(c);
-                    state.overlay_scroll = 0;
-                    state.wizard_set_cursor(0);
-                }
-
-                _ => {}
-            }
-        }
 
         // ── Confirm dialog ──────────────────────────────────────────────
         Mode::Confirm { tag, .. } => {

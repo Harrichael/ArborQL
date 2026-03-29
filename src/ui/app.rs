@@ -17,118 +17,6 @@ pub const PALETTE_COMMANDS: &[(&str, &str, &str)] = &[
     ("schema",      "s", "Toggle schema sidebar"),
 ];
 
-/// Which field is active in the virtual FK creation form.
-#[derive(Debug, Clone, PartialEq)]
-pub enum VirtualFkField {
-    FromTable,
-    IdColumn,
-    TypeColumn,
-    TypeValue,
-    ToTable,
-    ToColumn,
-}
-
-impl VirtualFkField {
-    /// Return the next field in Tab order.
-    pub fn next(&self, type_column_empty: bool) -> Self {
-        match self {
-            Self::FromTable => Self::IdColumn,
-            Self::IdColumn => Self::TypeColumn,
-            // Skip TypeValue if no type_column is set
-            Self::TypeColumn => {
-                if type_column_empty { Self::ToTable } else { Self::TypeValue }
-            }
-            Self::TypeValue => Self::ToTable,
-            Self::ToTable => Self::ToColumn,
-            Self::ToColumn => Self::FromTable,
-        }
-    }
-
-    /// Return the previous field in Shift+Tab order.
-    pub fn prev(&self, type_column_empty: bool) -> Self {
-        match self {
-            Self::FromTable => Self::ToColumn,
-            Self::IdColumn => Self::FromTable,
-            Self::TypeColumn => Self::IdColumn,
-            // Skip TypeValue if no type_column is set
-            Self::TypeValue => Self::TypeColumn,
-            Self::ToTable => {
-                if type_column_empty { Self::TypeColumn } else { Self::TypeValue }
-            }
-            Self::ToColumn => Self::ToTable,
-        }
-    }
-
-    /// Human-readable label for the field.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::FromTable => "from_table",
-            Self::IdColumn => "id_column",
-            Self::TypeColumn => "type_column",
-            Self::TypeValue => "type_value",
-            Self::ToTable => "to_table",
-            Self::ToColumn => "to_column",
-        }
-    }
-}
-
-/// State for the virtual FK creation form.
-///
-/// A single-screen wizard where Tab/Shift+Tab moves between fields.
-/// All fields are visible at once; the active field shows a dropdown list.
-/// `type_column` and `type_value` are optional (empty = no discriminator).
-#[derive(Debug, Clone, PartialEq)]
-pub struct VirtualFkForm {
-    /// Currently active field (receiving input / showing dropdown).
-    pub active_field: VirtualFkField,
-    /// Selected from_table value (empty = not yet chosen).
-    pub from_table: String,
-    /// Selected id_column value (empty = not yet chosen).
-    pub id_column: String,
-    /// Selected type_column value (empty = no discriminator — simple FK).
-    pub type_column: String,
-    /// Selected type_value (empty = not applicable or not chosen).
-    pub type_value: String,
-    /// Selected to_table value (empty = not yet chosen).
-    pub to_table: String,
-    /// Selected to_column value (empty = not yet chosen).
-    pub to_column: String,
-    /// Cursor position within the active field's dropdown list.
-    pub cursor: usize,
-    /// Live type-value options loaded from the DB when TypeValue is active.
-    pub type_options: Vec<(String, i64)>,
-}
-
-impl VirtualFkForm {
-    pub fn new() -> Self {
-        Self {
-            active_field: VirtualFkField::FromTable,
-            from_table: String::new(),
-            id_column: String::new(),
-            type_column: String::new(),
-            type_value: String::new(),
-            to_table: String::new(),
-            to_column: String::new(),
-            cursor: 0,
-            type_options: Vec::new(),
-        }
-    }
-
-    /// Returns `true` when all required fields are filled.
-    pub fn is_complete(&self) -> bool {
-        !self.from_table.is_empty()
-            && !self.id_column.is_empty()
-            && !self.to_table.is_empty()
-            && !self.to_column.is_empty()
-    }
-}
-
-impl Default for VirtualFkForm {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// All possible modes the UI can be in.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -144,10 +32,6 @@ pub enum Mode {
     Error(String),
     /// Informational message displayed.
     Info(String),
-    /// User is managing virtual FK definitions.
-    VirtualFkManager { cursor: usize },
-    /// User is filling the virtual FK creation form (single-screen, Tab-navigable).
-    VirtualFkAdd(VirtualFkForm),
     /// User is viewing the internal log history.
     LogViewer { cursor: usize },
     /// User is doing a reverse-i-search through command history.
@@ -213,6 +97,8 @@ pub struct AppState {
     pub manuals: Option<crate::app::manuals_manager::widget::ManualsWidget>,
     /// Connection manager overlay state, if open.
     pub conn_manager: Option<crate::app::connection_manager::widget::ConnManagerWidget>,
+    /// Virtual FK manager overlay state, if open.
+    pub vfk_manager: Option<crate::app::virtual_fk_manager::widget::VfkWidget>,
     /// Virtual FK definitions managed by the user.
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
@@ -264,6 +150,7 @@ impl AppState {
             column_add: None,
             manuals: None,
             conn_manager: None,
+            vfk_manager: None,
             virtual_fks: Vec::new(),
             logs: Vec::new(),
             overlay_scroll: 0,
@@ -416,20 +303,6 @@ impl AppState {
         self.overlay_scroll = 0;
     }
 
-    /// Get the cursor in the current VirtualFkAdd form.
-    pub fn wizard_cursor(&self) -> usize {
-        match &self.mode {
-            Mode::VirtualFkAdd(form) => form.cursor,
-            _ => 0,
-        }
-    }
-
-    /// Update the cursor in the current VirtualFkAdd form.
-    pub fn wizard_set_cursor(&mut self, c: usize) {
-        if let Mode::VirtualFkAdd(form) = &mut self.mode {
-            form.cursor = c;
-        }
-    }
 
     /// Get text entered so far.
     pub fn input_text(&self) -> &str {
