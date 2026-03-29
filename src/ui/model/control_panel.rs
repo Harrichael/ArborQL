@@ -1,6 +1,6 @@
 use crossterm::event::KeyEvent;
 
-use super::keys::{UserFocusLoci, UserKeyEvent};
+use super::keys::{FocusLoci, UserKeyEvent};
 
 /// A widget's key event handler. All methods have default no-op implementations;
 /// widgets implement only the events they care about.
@@ -9,7 +9,7 @@ use super::keys::{UserFocusLoci, UserKeyEvent};
 pub trait ControlPanel {
     /// Returns the current focus state for key→event translation.
     /// Called before each key event to determine how raw keys map to semantic events.
-    fn focus_loci(&self) -> UserFocusLoci;
+    fn focus_loci(&self) -> FocusLoci;
 
     // ── Global ──────────────────────────────────────────────────────
     fn on_suspend(&mut self) {}

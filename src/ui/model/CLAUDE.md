@@ -32,7 +32,7 @@ crossterm::KeyEvent
         │
         ▼
 ┌──────────────────┐
-│  from_key_event  │  keys.rs — translates raw keys using UserFocusLoci
+│  from_key_event  │  keys.rs — translates raw keys using FocusLoci
 │                  │  (InputFocus × EntityFocus)
 └────────┬─────────┘
          │ UserKeyEvent
@@ -57,7 +57,7 @@ crossterm::KeyEvent
 meaning depends on context, not on the key itself.
 
 **Solution**: `from_key_event(key, focus)` translates a raw `KeyEvent` into an
-`Option<UserKeyEvent>` based on a `UserFocusLoci` — a two-dimensional focus
+`Option<UserKeyEvent>` based on a `FocusLoci` — a two-dimensional focus
 state:
 
 - **`InputFocus`** — is a text buffer capturing keystrokes?
@@ -136,7 +136,7 @@ variants and makes the overlay search sub-state natural to express.
 
 | File | Role |
 |------|------|
-| `keys.rs` | `UserKeyEvent` enum, `UserFocusLoci` struct, `from_key_event()`, snapshot test |
+| `keys.rs` | `UserKeyEvent` enum, `FocusLoci` struct, `from_key_event()`, snapshot test |
 | `control_panel.rs` | `ControlPanel` trait, `dispatch()` |
 
 ## How to add a new event

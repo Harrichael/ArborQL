@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::widget::ColumnManagerWidget;
 use crate::ui::model::control_panel::ControlPanel;
-use crate::ui::model::keys::{InputFocus, UserFocusLoci};
+use crate::ui::model::keys::{InputFocus, FocusLoci};
 
 /// Move cursor left by one char boundary.
 fn move_left(s: &str, cursor: usize) -> usize {
@@ -64,7 +64,7 @@ fn clamp_scroll(w: &mut ColumnManagerWidget) {
 }
 
 impl ControlPanel for ColumnManagerWidget {
-    fn focus_loci(&self) -> UserFocusLoci {
+    fn focus_loci(&self) -> FocusLoci {
         self.focus
     }
 

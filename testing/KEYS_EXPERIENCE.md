@@ -132,7 +132,7 @@ snapshot table would be clearer.
 ## Example in this codebase
 
 `key_mapping_snapshot` in `src/ui/model/keys.rs` tests the `from_key_event`
-function which maps `(KeyEvent, UserFocusLoci)` to `Option<UserKeyEvent>`.
+function which maps `(KeyEvent, FocusLoci)` to `Option<UserKeyEvent>`.
 
 - **Rows**: 17 special keys + 26 lowercase + 26 uppercase = 69 inputs
   (collapsed to ~43 displayed rows)

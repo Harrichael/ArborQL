@@ -30,7 +30,7 @@ pub enum EntityFocus {
 
 /// Multi-dimensional focus state that determines key→event mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UserFocusLoci {
+pub struct FocusLoci {
     pub input: InputFocus,
     pub entity: EntityFocus,
 }
@@ -83,7 +83,7 @@ pub enum UserKeyEvent {
 /// Convert a crossterm `KeyEvent` into a `UserKeyEvent` given the current focus.
 ///
 /// Returns `None` for key combinations that have no mapping in the given focus.
-pub fn from_key_event(key: KeyEvent, focus: &UserFocusLoci) -> Option<UserKeyEvent> {
+pub fn from_key_event(key: KeyEvent, focus: &FocusLoci) -> Option<UserKeyEvent> {
     // 1. Modifier combos (always)
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(c) = key.code {
@@ -199,8 +199,8 @@ mod tests {
         }
     }
 
-    fn loci(input: InputFocus, entity: EntityFocus) -> UserFocusLoci {
-        UserFocusLoci { input, entity }
+    fn loci(input: InputFocus, entity: EntityFocus) -> FocusLoci {
+        FocusLoci { input, entity }
     }
 
     fn event_name(e: &Option<UserKeyEvent>) -> String {
@@ -244,7 +244,7 @@ mod tests {
         }
     }
 
-    fn row_values(key_event: KeyEvent, columns: &[(&str, UserFocusLoci)]) -> Vec<String> {
+    fn row_values(key_event: KeyEvent, columns: &[(&str, FocusLoci)]) -> Vec<String> {
         columns.iter()
             .map(|(_, focus)| event_name(&from_key_event(key_event, focus)))
             .collect()
@@ -349,7 +349,7 @@ mod tests {
         for &input in &all_inputs {
             let mut groups: Vec<(Vec<String>, Vec<EntityFocus>)> = Vec::new();
             for &entity in &all_entities {
-                let focus = UserFocusLoci { input, entity };
+                let focus = FocusLoci { input, entity };
                 let col_values: Vec<String> = all_key_events.iter()
                     .map(|ke| event_name(&from_key_event(*ke, &focus)))
                     .collect();
@@ -375,7 +375,7 @@ mod tests {
         // Helper to compute row values across final columns
         let row_vals = |ke: KeyEvent| -> Vec<String> {
             columns.iter()
-                .map(|col| event_name(&from_key_event(ke, &UserFocusLoci { input: col.input, entity: col.entity })))
+                .map(|col| event_name(&from_key_event(ke, &FocusLoci { input: col.input, entity: col.entity })))
                 .collect()
         };
 
