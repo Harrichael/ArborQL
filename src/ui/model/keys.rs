@@ -139,7 +139,6 @@ pub fn from_key_event(key: KeyEvent, focus: &FocusLoci) -> Option<UserKeyEvent> 
         EntityFocus::Overlay => match key.code {
             KeyCode::Char('j') => Some(UserKeyEvent::NavigateDown),
             KeyCode::Char('k') => Some(UserKeyEvent::NavigateUp),
-            KeyCode::Char('q' | 'Q') => Some(UserKeyEvent::Quit),
             KeyCode::Char('/') => Some(UserKeyEvent::StartSearch),
             KeyCode::Char('x' | 'd') => Some(UserKeyEvent::Remove),
             KeyCode::Char('a') => Some(UserKeyEvent::AddItem),
@@ -154,7 +153,6 @@ pub fn from_key_event(key: KeyEvent, focus: &FocusLoci) -> Option<UserKeyEvent> 
         EntityFocus::Editable => match key.code {
             KeyCode::Char('j') => Some(UserKeyEvent::NavigateDown),
             KeyCode::Char('k') => Some(UserKeyEvent::NavigateUp),
-            KeyCode::Char('q' | 'Q') => Some(UserKeyEvent::Quit),
             KeyCode::Char('/') => Some(UserKeyEvent::StartSearch),
             KeyCode::Char('x') => Some(UserKeyEvent::Remove),
             KeyCode::Char('d') => Some(UserKeyEvent::MoveItemDown),
@@ -480,9 +478,7 @@ k         | NavUp     | Text(k)   | Text(k)   | NavUp     | NavUp     | -       
 l-m       | Text(l-m) | Text(l-m) | Text(l-m) | -         | -         | -         | Back
 n         | Text(n)   | Text(n)   | Text(n)   | LoadMore  | -         | No        | Back
 o         | Text(o)   | Text(o)   | Text(o)   | InsAft    | InsAft    | -         | Back
-p         | Text(p)   | Text(p)   | Text(p)   | -         | -         | -         | Back
-q         | Text(q)   | Text(q)   | Text(q)   | Quit      | Quit      | -         | Back
-r-t       | Text(r-t) | Text(r-t) | Text(r-t) | -         | -         | -         | Back
+p-t       | Text(p-t) | Text(p-t) | Text(p-t) | -         | -         | -         | Back
 u         | Text(u)   | Text(u)   | Text(u)   | -         | MoveUp    | -         | Back
 v-w       | Text(v-w) | Text(v-w) | Text(v-w) | -         | -         | -         | Back
 x         | Text(x)   | Text(x)   | Text(x)   | Remove    | Remove    | -         | Back
@@ -490,9 +486,7 @@ y         | Text(y)   | Text(y)   | Text(y)   | Redo      | Redo      | Yes     
 z         | Text(z)   | Text(z)   | Text(z)   | Undo      | Undo      | -         | Back
 A-M       | Text(A-M) | Text(A-M) | Text(A-M) | -         | -         | -         | Back
 N         | Text(N)   | Text(N)   | Text(N)   | -         | -         | No        | Back
-O-P       | Text(O-P) | Text(O-P) | Text(O-P) | -         | -         | -         | Back
-Q         | Text(Q)   | Text(Q)   | Text(Q)   | Quit      | Quit      | -         | Back
-R-X       | Text(R-X) | Text(R-X) | Text(R-X) | -         | -         | -         | Back
+O-X       | Text(O-X) | Text(O-X) | Text(O-X) | -         | -         | -         | Back
 Y         | Text(Y)   | Text(Y)   | Text(Y)   | -         | -         | Yes       | Back
 Z         | Text(Z)   | Text(Z)   | Text(Z)   | -         | -         | -         | Back
 ";

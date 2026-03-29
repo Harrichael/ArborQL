@@ -303,6 +303,29 @@ mod tests {
         assert_eq!(p.focus.input, InputFocus::Search);
     }
 
+    #[test]
+    fn focus_loci_lifecycle() {
+        use crate::ui::model::keys::EntityFocus;
+        let mut p = widget(&["id"]);
+
+        // Default: no input, editable entity
+        let f = p.focus_loci();
+        assert_eq!(f.input, InputFocus::None);
+        assert_eq!(f.entity, EntityFocus::Editable);
+
+        // Start search: input becomes Search
+        p.on_start_search();
+        let f = p.focus_loci();
+        assert_eq!(f.input, InputFocus::Search);
+        assert_eq!(f.entity, EntityFocus::Editable);
+
+        // Back from search: input returns to None
+        p.on_back();
+        let f = p.focus_loci();
+        assert_eq!(f.input, InputFocus::None);
+        assert_eq!(f.entity, EntityFocus::Editable);
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }

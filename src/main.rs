@@ -21,7 +21,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use rules::Completion;
 
 use std::io;
-use app::column_manager::service::ColumnManagerModule;
+use app::column_manager::module::ColumnManagerModule;
 use app::model::SchemaNode;
 use connection_manager::{ConnectionManager, ConnectionType};
 use ui::app::{AppState, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, PALETTE_COMMANDS, VirtualFkField, VirtualFkForm};
@@ -293,6 +293,17 @@ async fn handle_key(
                 state.column_manager.apply_widget(widget);
             }
             state.column_add = None;
+        }
+        return Ok(true);
+    }
+
+    // Manuals overlay has exclusive key handling while open.
+    if let Some(ref mut widget) = state.manuals {
+        if let Some(event) = from_key_event(key, &widget.focus_loci()) {
+            dispatch(widget, event);
+        }
+        if widget.closed {
+            state.manuals = None;
         }
         return Ok(true);
     }
@@ -574,7 +585,7 @@ async fn handle_key(
                             state.mode = Mode::LogViewer { cursor: state.logs.len().saturating_sub(1) };
                         }
                         Some("manuals") => {
-                            state.mode = Mode::ManualList { cursor: 0 };
+                            state.manuals = Some(app::manuals::widget::ManualsWidget::new());
                         }
                         Some("prune") => {
                             let flat = flatten_tree(&engine.roots);
@@ -1482,49 +1493,6 @@ async fn handle_key(
             }
         }
 
-        // ── Manual list ──────────────────────────────────────────────────
-        Mode::ManualList { cursor } => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => {
-                    state.mode = Mode::Normal;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if cursor > 0 {
-                        state.mode = Mode::ManualList { cursor: cursor - 1 };
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if cursor + 1 < ui::render::MANUALS.len() {
-                        state.mode = Mode::ManualList { cursor: cursor + 1 };
-                    }
-                }
-                KeyCode::Enter => {
-                    state.mode = Mode::ManualView { index: cursor, scroll: 0 };
-                }
-                _ => {}
-            }
-        }
-
-        // ── Manual viewer ────────────────────────────────────────────────
-        Mode::ManualView { index, scroll } => {
-            let line_count = ui::render::manual_line_count(index);
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    state.mode = Mode::ManualList { cursor: index };
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if scroll > 0 {
-                        state.mode = Mode::ManualView { index, scroll: scroll - 1 };
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if scroll + 1 < line_count {
-                        state.mode = Mode::ManualView { index, scroll: scroll + 1 };
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     Ok(true)

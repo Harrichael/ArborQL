@@ -154,10 +154,6 @@ pub enum Mode {
     VirtualFkAdd(VirtualFkForm),
     /// User is viewing the internal log history.
     LogViewer { cursor: usize },
-    /// User is browsing the list of available manuals.
-    ManualList { cursor: usize },
-    /// User is reading a specific manual (index into MANUALS slice, scroll offset).
-    ManualView { index: usize, scroll: usize },
     /// User is doing a reverse-i-search through command history.
     CommandSearch {
         /// The search query typed so far.
@@ -308,9 +304,11 @@ pub struct AppState {
     /// Column names per table, for command completion hints.
     pub table_columns: HashMap<String, Vec<String>>,
     /// Column visibility manager (persistent service).
-    pub column_manager: crate::app::column_manager::service::ColumnManagerModule,
+    pub column_manager: crate::app::column_manager::module::ColumnManagerModule,
     /// Column manager overlay state, if open.
     pub column_add: Option<crate::app::column_manager::widget::ColumnManagerWidget>,
+    /// Manuals overlay state, if open.
+    pub manuals: Option<crate::app::manuals::widget::ManualsWidget>,
     /// Virtual FK definitions managed by the user.
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
@@ -361,8 +359,9 @@ impl AppState {
             rule_reorder_redo: Vec::new(),
             show_schema: false,
             table_columns: HashMap::new(),
-            column_manager: crate::app::column_manager::service::ColumnManagerModule::new(vec![], std::collections::HashMap::new()),
+            column_manager: crate::app::column_manager::module::ColumnManagerModule::new(vec![], std::collections::HashMap::new()),
             column_add: None,
+            manuals: None,
             virtual_fks: Vec::new(),
             logs: Vec::new(),
             overlay_scroll: 0,
