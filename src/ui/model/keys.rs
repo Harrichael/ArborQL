@@ -123,7 +123,11 @@ pub fn from_key_event(key: KeyEvent, focus: &UserFocusLoci) -> Option<UserKeyEve
             return match key.code {
                 KeyCode::Char('j') => Some(UserKeyEvent::NavigateDown),
                 KeyCode::Char('k') => Some(UserKeyEvent::NavigateUp),
-                KeyCode::Char(_) => Some(UserKeyEvent::TextInput(key)),
+                KeyCode::Char(_)
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Backspace
+                | KeyCode::Delete => Some(UserKeyEvent::TextInput(key)),
                 _ => None,
             };
         }
@@ -326,6 +330,8 @@ mod tests {
             ("Down",      key(KeyCode::Down)),
             ("Left",      key(KeyCode::Left)),
             ("Right",     key(KeyCode::Right)),
+            ("Ctrl+Left", KeyEvent::new(KeyCode::Left,  KeyModifiers::CONTROL)),
+            ("Ctrl+Right",KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)),
             ("Backspace", key(KeyCode::Backspace)),
             ("Delete",    key(KeyCode::Delete)),
             ("Space",     key(KeyCode::Char(' '))),
@@ -455,10 +461,12 @@ Tab       | NxtFld    | NxtFld    | NxtFld    | NxtFld    | NxtFld    | NxtFld  
 BackTab   | PrvFld    | PrvFld    | PrvFld    | PrvFld    | PrvFld    | PrvFld    | PrvFld
 Up        | NavUp     | NavUp     | NavUp     | NavUp     | NavUp     | NavUp     | NavUp
 Down      | NavDown   | NavDown   | NavDown   | NavDown   | NavDown   | NavDown   | NavDown
-Left      | -         | Text(←)   | Text(←)   | -         | -         | -         | Back
-Right     | -         | Text(→)   | Text(→)   | -         | -         | -         | Back
-Backspace | -         | Text(BS)  | Text(BS)  | -         | -         | -         | Back
-Delete    | -         | Text(Del) | Text(Del) | -         | -         | -         | Back
+Left      | Text(←)   | Text(←)   | Text(←)   | -         | -         | -         | Back
+Right     | Text(→)   | Text(→)   | Text(→)   | -         | -         | -         | Back
+Ctrl+Left | Text(←)   | Text(←)   | Text(←)   | -         | -         | -         | Back
+Ctrl+Right| Text(→)   | Text(→)   | Text(→)   | -         | -         | -         | Back
+Backspace | Text(BS)  | Text(BS)  | Text(BS)  | -         | -         | -         | Back
+Delete    | Text(Del) | Text(Del) | Text(Del) | -         | -         | -         | Back
 Space     | Text( )   | Text( )   | TogItem   | TogItem   | TogItem   | -         | Back
 :         | Text(:)   | Text(:)   | Text(:)   | -         | -         | -         | Back
 /         | Text(/)   | Text(/)   | Text(/)   | StartSrch | StartSrch | -         | Back

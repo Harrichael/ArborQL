@@ -6,20 +6,37 @@ use ratatui::{
     Frame,
 };
 
-/// Render a search/filter bar with a blinking cursor when active.
-pub fn render_search_bar(f: &mut Frame, area: Rect, query: &str, active: bool) {
+/// Render a search/filter bar. When `active`, a cursor is shown at `cursor`
+/// (a byte offset into `query`).
+pub fn render_search_bar(f: &mut Frame, area: Rect, query: &str, active: bool, cursor: usize) {
     let (border_color, title) = if active {
         (Color::Yellow, " Search (Esc to stop typing, keep filter) ")
     } else {
         (Color::DarkGray, " Filter active (/ to edit, Esc to clear) ")
     };
-    let text = Line::from(vec![
-        Span::styled("/ ", Style::default().fg(Color::Yellow)),
-        Span::styled(query, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        if active { Span::styled("▌", Style::default().fg(Color::Yellow)) } else { Span::raw("") },
-    ]);
+    let text_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    let spans = if active {
+        let cursor = cursor.min(query.len());
+        let before = &query[..cursor];
+        let at = query[cursor..].chars().next()
+            .map(|c| c.len_utf8())
+            .unwrap_or(0);
+        let after = &query[cursor + at..];
+        let cursor_char = if at == 0 { " " } else { &query[cursor..cursor + at] };
+        vec![
+            Span::styled("/ ", Style::default().fg(Color::Yellow)),
+            Span::styled(before, text_style),
+            Span::styled(cursor_char, Style::default().bg(Color::Yellow).fg(Color::Black)),
+            Span::styled(after, text_style),
+        ]
+    } else {
+        vec![
+            Span::styled("/ ", Style::default().fg(Color::Yellow)),
+            Span::styled(query, text_style),
+        ]
+    };
     f.render_widget(
-        Paragraph::new(text).block(
+        Paragraph::new(Line::from(spans)).block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)

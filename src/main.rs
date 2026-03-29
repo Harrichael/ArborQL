@@ -25,8 +25,8 @@ use app::column_manager::service::ColumnManagerService;
 use app::model::SchemaNode;
 use connection_manager::{ConnectionManager, ConnectionType};
 use ui::app::{AppState, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, PALETTE_COMMANDS, VirtualFkField, VirtualFkForm};
-use ui::model::control_panel::dispatch;
-use ui::model::keys::{from_key_event, EntityFocus, InputFocus, UserFocusLoci};
+use ui::model::control_panel::{dispatch, ControlPanel};
+use ui::model::keys::from_key_event;
 use schema::VirtualFkDef;
 
 /// LatticeQL — Navigate complex datasets from multiple sources intuitively.
@@ -284,17 +284,13 @@ async fn handle_key(
     }
 
     // Column manager overlay has exclusive key handling while open.
-    if let Some(ref mut panel) = state.column_add {
-        let focus = UserFocusLoci {
-            input: if panel.search_active { InputFocus::Search } else { InputFocus::None },
-            entity: EntityFocus::Editable,
-        };
-        if let Some(event) = from_key_event(key, &focus) {
-            dispatch(panel, event);
+    if let Some(ref mut widget) = state.column_add {
+        if let Some(event) = from_key_event(key, &widget.focus_loci()) {
+            dispatch(widget, event);
         }
-        if panel.closed {
-            if panel.confirmed {
-                state.column_manager.apply_widget(panel);
+        if widget.closed {
+            if widget.confirmed {
+                state.column_manager.apply_widget(widget);
             }
             state.column_add = None;
         }
@@ -542,9 +538,9 @@ async fn handle_key(
                             if state.selected_row < flat.len() {
                                 let (_, node) = flat[state.selected_row];
                                 let available = columns_for_table(&engine.roots, &node.table);
-                                let panel = state.column_manager.open_widget(&node.table, &available);
-                                if !panel.items.is_empty() {
-                                    state.column_add = Some(panel);
+                                let widget = state.column_manager.open_widget(&node.table, &available);
+                                if !widget.items.is_empty() {
+                                    state.column_add = Some(widget);
                                 }
                             }
                             state.mode = Mode::Normal;

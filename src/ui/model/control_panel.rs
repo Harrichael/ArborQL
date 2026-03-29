@@ -1,10 +1,16 @@
 use crossterm::event::KeyEvent;
 
-use super::keys::UserKeyEvent;
+use super::keys::{UserFocusLoci, UserKeyEvent};
 
 /// A widget's key event handler. All methods have default no-op implementations;
 /// widgets implement only the events they care about.
+///
+/// `focus_loci` has no default — every widget must declare its focus state.
 pub trait ControlPanel {
+    /// Returns the current focus state for key→event translation.
+    /// Called before each key event to determine how raw keys map to semantic events.
+    fn focus_loci(&self) -> UserFocusLoci;
+
     // ── Global ──────────────────────────────────────────────────────
     fn on_suspend(&mut self) {}
     fn on_back(&mut self) {}
@@ -42,32 +48,32 @@ pub trait ControlPanel {
 /// The single place that matches on `UserKeyEvent` and routes to trait methods.
 /// Adding a new event variant requires adding a default no-op to `ControlPanel`
 /// and a new arm here — the compiler enforces exhaustiveness.
-pub fn dispatch(panel: &mut dyn ControlPanel, event: UserKeyEvent) {
+pub fn dispatch(ctrl_panel: &mut dyn ControlPanel, event: UserKeyEvent) {
     match event {
-        UserKeyEvent::Suspend => panel.on_suspend(),
-        UserKeyEvent::Back => panel.on_back(),
-        UserKeyEvent::Confirm => panel.on_confirm(),
-        UserKeyEvent::ForceQuit => panel.on_force_quit(),
-        UserKeyEvent::Save => panel.on_save(),
-        UserKeyEvent::ReverseSearch => panel.on_reverse_search(),
-        UserKeyEvent::NavigateUp => panel.on_navigate_up(),
-        UserKeyEvent::NavigateDown => panel.on_navigate_down(),
-        UserKeyEvent::NextField => panel.on_next_field(),
-        UserKeyEvent::PrevField => panel.on_prev_field(),
-        UserKeyEvent::Quit => panel.on_quit(),
-        UserKeyEvent::StartSearch => panel.on_start_search(),
-        UserKeyEvent::Remove => panel.on_remove(),
-        UserKeyEvent::AddItem => panel.on_add_item(),
-        UserKeyEvent::InsertBefore => panel.on_insert_before(),
-        UserKeyEvent::InsertAfter => panel.on_insert_after(),
-        UserKeyEvent::Undo => panel.on_undo(),
-        UserKeyEvent::ToggleItem => panel.on_toggle_item(),
-        UserKeyEvent::Redo => panel.on_redo(),
-        UserKeyEvent::LoadMore => panel.on_load_more(),
-        UserKeyEvent::MoveItemUp => panel.on_move_item_up(),
-        UserKeyEvent::MoveItemDown => panel.on_move_item_down(),
-        UserKeyEvent::ConfirmYes => panel.on_confirm_yes(),
-        UserKeyEvent::ConfirmNo => panel.on_confirm_no(),
-        UserKeyEvent::TextInput(key) => panel.on_text_input(key),
+        UserKeyEvent::Suspend => ctrl_panel.on_suspend(),
+        UserKeyEvent::Back => ctrl_panel.on_back(),
+        UserKeyEvent::Confirm => ctrl_panel.on_confirm(),
+        UserKeyEvent::ForceQuit => ctrl_panel.on_force_quit(),
+        UserKeyEvent::Save => ctrl_panel.on_save(),
+        UserKeyEvent::ReverseSearch => ctrl_panel.on_reverse_search(),
+        UserKeyEvent::NavigateUp => ctrl_panel.on_navigate_up(),
+        UserKeyEvent::NavigateDown => ctrl_panel.on_navigate_down(),
+        UserKeyEvent::NextField => ctrl_panel.on_next_field(),
+        UserKeyEvent::PrevField => ctrl_panel.on_prev_field(),
+        UserKeyEvent::Quit => ctrl_panel.on_quit(),
+        UserKeyEvent::StartSearch => ctrl_panel.on_start_search(),
+        UserKeyEvent::Remove => ctrl_panel.on_remove(),
+        UserKeyEvent::AddItem => ctrl_panel.on_add_item(),
+        UserKeyEvent::InsertBefore => ctrl_panel.on_insert_before(),
+        UserKeyEvent::InsertAfter => ctrl_panel.on_insert_after(),
+        UserKeyEvent::Undo => ctrl_panel.on_undo(),
+        UserKeyEvent::ToggleItem => ctrl_panel.on_toggle_item(),
+        UserKeyEvent::Redo => ctrl_panel.on_redo(),
+        UserKeyEvent::LoadMore => ctrl_panel.on_load_more(),
+        UserKeyEvent::MoveItemUp => ctrl_panel.on_move_item_up(),
+        UserKeyEvent::MoveItemDown => ctrl_panel.on_move_item_down(),
+        UserKeyEvent::ConfirmYes => ctrl_panel.on_confirm_yes(),
+        UserKeyEvent::ConfirmNo => ctrl_panel.on_confirm_no(),
+        UserKeyEvent::TextInput(key) => ctrl_panel.on_text_input(key),
     }
 }

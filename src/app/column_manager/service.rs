@@ -3,13 +3,6 @@ use std::collections::{HashMap, HashSet};
 use crate::app::model::SchemaNode;
 use super::widget::ColumnManagerWidget;
 
-/// Working item in the column manager overlay.
-#[derive(Debug, Clone)]
-pub struct ColumnManagerItem {
-    pub name: String,
-    pub enabled: bool,
-}
-
 /// Persistent service that owns all column visibility state.
 /// Always exists. The widget is a temporary interaction view
 /// created via `open_widget`.
@@ -81,11 +74,11 @@ impl ColumnManagerService {
         self.order.get(node_name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Create a panel for the TUI overlay. `available_columns` is the set of
+    /// Create a widget for the TUI overlay. `available_columns` is the set of
     /// columns actually present in the data (may differ from schema if rows
     /// have extra/missing fields).
     pub fn open_widget(&self, node_name: &str, available_columns: &[String]) -> ColumnManagerWidget {
-        let shown: HashSet<String> = self.visible_columns(node_name).iter().cloned().collect();
+        let visible: Vec<String> = self.visible_columns(node_name).to_vec();
         let mut ordered: Vec<String> = self.column_order(node_name).to_vec();
 
         // Add any columns present in data but not yet in the order list.
@@ -97,21 +90,13 @@ impl ColumnManagerService {
         // Remove columns not present in the available data.
         ordered.retain(|c| available_columns.contains(c));
 
-        let items: Vec<ColumnManagerItem> = ordered
-            .into_iter()
-            .map(|name| ColumnManagerItem {
-                enabled: shown.contains(&name),
-                name,
-            })
-            .collect();
-
-        ColumnManagerWidget::new(node_name.to_string(), items)
+        ColumnManagerWidget::new(node_name.to_string(), ordered, visible)
     }
 
-    /// Apply confirmed panel results back into the manager.
-    pub fn apply_widget(&mut self, panel: &ColumnManagerWidget) {
-        self.visible.insert(panel.table.clone(), panel.visible_columns());
-        self.order.insert(panel.table.clone(), panel.column_order());
+    /// Apply confirmed widget results back into the service.
+    pub fn apply_widget(&mut self, widget: &ColumnManagerWidget) {
+        self.visible.insert(widget.table.clone(), widget.visible_columns());
+        self.order.insert(widget.table.clone(), widget.column_order());
     }
 }
 
@@ -182,11 +167,11 @@ mod tests {
         let mut mgr = ColumnManagerService::new(vec!["id".into()], HashMap::new());
         mgr.register_node(&schema_node("users", &["id", "name", "email"]));
 
-        let panel = mgr.open_widget("users", &["id".into(), "name".into(), "email".into()]);
-        assert_eq!(panel.items.len(), 3);
-        assert!(panel.items[0].enabled);   // id is visible
-        assert!(!panel.items[1].enabled);  // name is not
-        assert!(!panel.items[2].enabled);  // email is not
+        let widget = mgr.open_widget("users", &["id".into(), "name".into(), "email".into()]);
+        assert_eq!(widget.items.len(), 3);
+        assert!(widget.items[0].enabled);   // id is visible
+        assert!(!widget.items[1].enabled);  // name is not
+        assert!(!widget.items[2].enabled);  // email is not
     }
 
     #[test]
@@ -194,9 +179,9 @@ mod tests {
         let mut mgr = ColumnManagerService::new(vec!["id".into()], HashMap::new());
         mgr.register_node(&schema_node("users", &["id", "name"]));
 
-        let mut panel = mgr.open_widget("users", &["id".into(), "name".into()]);
-        panel.items[1].enabled = true; // enable "name"
-        mgr.apply_widget(&panel);
+        let mut widget = mgr.open_widget("users", &["id".into(), "name".into()]);
+        widget.items[1].enabled = true; // enable "name"
+        mgr.apply_widget(&widget);
 
         assert_eq!(mgr.visible_columns("users"), &["id", "name"]);
     }

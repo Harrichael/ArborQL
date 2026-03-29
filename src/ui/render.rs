@@ -494,8 +494,8 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
 }
 
 fn render_column_add(f: &mut Frame, state: &mut AppState) {
-    if let Some(ref mut panel) = state.column_add {
-        crate::app::column_manager::render::render(f, panel);
+    if let Some(ref mut widget) = state.column_add {
+        crate::app::column_manager::render::render(f, widget);
     }
 }
 
@@ -604,7 +604,7 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
     // Search bar
     if has_search {
         let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
-        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active, state.overlay_search.len());
     }
 }
 
@@ -812,7 +812,7 @@ fn render_pick_list(
 
     if has_search {
         let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
-        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active, state.overlay_search.len());
     }
 }
 

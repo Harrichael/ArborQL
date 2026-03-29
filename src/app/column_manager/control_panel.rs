@@ -1,12 +1,80 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::widget::ColumnManagerWidget;
 use crate::ui::model::control_panel::ControlPanel;
+use crate::ui::model::keys::{EntityFocus, InputFocus, UserFocusLoci};
+
+/// Move cursor left by one char boundary.
+fn move_left(s: &str, cursor: usize) -> usize {
+    if cursor == 0 { return 0; }
+    let mut pos = cursor - 1;
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Move cursor right by one char boundary.
+fn move_right(s: &str, cursor: usize) -> usize {
+    if cursor >= s.len() { return s.len(); }
+    let mut pos = cursor + 1;
+    while pos < s.len() && !s.is_char_boundary(pos) {
+        pos += 1;
+    }
+    pos
+}
+
+/// Move cursor to start of previous word.
+fn move_word_left(s: &str, cursor: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut pos = cursor;
+    while pos > 0 && !bytes[pos - 1].is_ascii_alphanumeric() {
+        pos -= 1;
+    }
+    while pos > 0 && bytes[pos - 1].is_ascii_alphanumeric() {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Move cursor to end of next word.
+fn move_word_right(s: &str, cursor: usize) -> usize {
+    let bytes = s.as_bytes();
+    let len = s.len();
+    let mut pos = cursor;
+    while pos < len && !bytes[pos].is_ascii_alphanumeric() {
+        pos += 1;
+    }
+    while pos < len && bytes[pos].is_ascii_alphanumeric() {
+        pos += 1;
+    }
+    pos
+}
+
+/// Adjust scroll so the cursor stays within the visible viewport.
+/// No-op until render has reported the viewport height.
+fn clamp_scroll(w: &mut ColumnManagerWidget) {
+    if let Some(vh) = w.viewport_height {
+        if w.cursor < w.scroll {
+            w.scroll = w.cursor;
+        } else if w.cursor >= w.scroll + vh {
+            w.scroll = w.cursor + 1 - vh;
+        }
+    }
+}
 
 impl ControlPanel for ColumnManagerWidget {
+    fn focus_loci(&self) -> UserFocusLoci {
+        UserFocusLoci {
+            input: if self.search_active { InputFocus::Search } else { InputFocus::None },
+            entity: EntityFocus::Editable,
+        }
+    }
+
     fn on_navigate_up(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
+            clamp_scroll(self);
         }
     }
 
@@ -14,6 +82,7 @@ impl ControlPanel for ColumnManagerWidget {
         let filtered = self.filtered_indices();
         if self.cursor + 1 < filtered.len() {
             self.cursor += 1;
+            clamp_scroll(self);
         }
     }
 
@@ -22,6 +91,7 @@ impl ControlPanel for ColumnManagerWidget {
         if self.cursor > 0 && self.cursor < filtered.len() {
             self.items.swap(filtered[self.cursor], filtered[self.cursor - 1]);
             self.cursor -= 1;
+            clamp_scroll(self);
         }
     }
 
@@ -30,6 +100,7 @@ impl ControlPanel for ColumnManagerWidget {
         if self.cursor + 1 < filtered.len() {
             self.items.swap(filtered[self.cursor], filtered[self.cursor + 1]);
             self.cursor += 1;
+            clamp_scroll(self);
         }
     }
 
@@ -55,6 +126,7 @@ impl ControlPanel for ColumnManagerWidget {
             self.search_active = false;
         } else if !self.search.is_empty() {
             self.search.clear();
+            self.search_cursor = 0;
             self.scroll = 0;
             self.cursor = 0;
         } else {
@@ -68,17 +140,33 @@ impl ControlPanel for ColumnManagerWidget {
     }
 
     fn on_text_input(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char(c) => {
-                self.search.push(c);
+                self.search.insert(self.search_cursor, c);
+                self.search_cursor += c.len_utf8();
                 self.scroll = 0;
                 self.cursor = 0;
             }
             KeyCode::Backspace => {
-                self.search.pop();
-                self.scroll = 0;
-                self.cursor = 0;
+                if self.search_cursor > 0 {
+                    self.search_cursor = move_left(&self.search, self.search_cursor);
+                    self.search.remove(self.search_cursor);
+                    self.scroll = 0;
+                    self.cursor = 0;
+                }
             }
+            KeyCode::Delete => {
+                if self.search_cursor < self.search.len() {
+                    self.search.remove(self.search_cursor);
+                    self.scroll = 0;
+                    self.cursor = 0;
+                }
+            }
+            KeyCode::Left if ctrl => self.search_cursor = move_word_left(&self.search, self.search_cursor),
+            KeyCode::Right if ctrl => self.search_cursor = move_word_right(&self.search, self.search_cursor),
+            KeyCode::Left => self.search_cursor = move_left(&self.search, self.search_cursor),
+            KeyCode::Right => self.search_cursor = move_right(&self.search, self.search_cursor),
             _ => {}
         }
     }
@@ -87,25 +175,16 @@ impl ControlPanel for ColumnManagerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::column_manager::service::ColumnManagerItem;
 
-    fn items(names: &[&str]) -> Vec<ColumnManagerItem> {
-        names
-            .iter()
-            .map(|n| ColumnManagerItem {
-                name: n.to_string(),
-                enabled: true,
-            })
-            .collect()
-    }
-
-    fn panel(names: &[&str]) -> ColumnManagerWidget {
-        ColumnManagerWidget::new("test_table".into(), items(names))
+    fn widget(names: &[&str]) -> ColumnManagerWidget {
+        let ordered: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        let visible = ordered.clone();
+        ColumnManagerWidget::new("test_table".into(), ordered, visible)
     }
 
     #[test]
     fn navigate_clamps_to_bounds() {
-        let mut p = panel(&["id", "name", "email"]);
+        let mut p = widget(&["id", "name", "email"]);
         p.on_navigate_up(); // already at 0
         assert_eq!(p.cursor, 0);
         p.on_navigate_down();
@@ -117,7 +196,7 @@ mod tests {
 
     #[test]
     fn navigate_respects_search_filter() {
-        let mut p = panel(&["id", "name", "email"]);
+        let mut p = widget(&["id", "name", "email"]);
         p.search = "a".into(); // matches "name"(1), "email"(2)
         p.on_navigate_down();
         assert_eq!(p.cursor, 1); // only 2 filtered items
@@ -127,7 +206,7 @@ mod tests {
 
     #[test]
     fn toggle_flips_enabled() {
-        let mut p = panel(&["id", "name"]);
+        let mut p = widget(&["id", "name"]);
         assert!(p.items[0].enabled);
         p.on_toggle_item();
         assert!(!p.items[0].enabled);
@@ -137,14 +216,14 @@ mod tests {
 
     #[test]
     fn remove_behaves_like_toggle() {
-        let mut p = panel(&["id", "name"]);
+        let mut p = widget(&["id", "name"]);
         p.on_remove();
         assert!(!p.items[0].enabled);
     }
 
     #[test]
     fn toggle_targets_filtered_item() {
-        let mut p = panel(&["id", "name", "email"]);
+        let mut p = widget(&["id", "name", "email"]);
         p.search = "a".into(); // filtered: name(1), email(2)
         p.cursor = 1; // points to email in filtered view
         p.on_toggle_item();
@@ -155,7 +234,7 @@ mod tests {
 
     #[test]
     fn move_item_reorders() {
-        let mut p = panel(&["id", "name", "email"]);
+        let mut p = widget(&["id", "name", "email"]);
         p.cursor = 1; // on "name"
         p.on_move_item_up();
         assert_eq!(p.items[0].name, "name");
@@ -165,7 +244,7 @@ mod tests {
 
     #[test]
     fn move_item_down_reorders() {
-        let mut p = panel(&["id", "name", "email"]);
+        let mut p = widget(&["id", "name", "email"]);
         p.cursor = 1; // on "name"
         p.on_move_item_down();
         assert_eq!(p.items[1].name, "email");
@@ -175,7 +254,7 @@ mod tests {
 
     #[test]
     fn three_level_back() {
-        let mut p = panel(&["id"]);
+        let mut p = widget(&["id"]);
         p.search_active = true;
         p.search = "foo".into();
 
@@ -195,7 +274,7 @@ mod tests {
 
     #[test]
     fn confirm_sets_flags_and_results() {
-        let mut p = panel(&["id", "name", "email"]);
+        let mut p = widget(&["id", "name", "email"]);
         p.items[1].enabled = false; // disable "name"
         p.on_confirm();
         assert!(p.confirmed);
@@ -206,7 +285,7 @@ mod tests {
 
     #[test]
     fn text_input_updates_search() {
-        let mut p = panel(&["id", "name"]);
+        let mut p = widget(&["id", "name"]);
         p.search_active = true;
 
         let char_n = KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
@@ -221,9 +300,141 @@ mod tests {
 
     #[test]
     fn start_search_activates() {
-        let mut p = panel(&["id"]);
+        let mut p = widget(&["id"]);
         assert!(!p.search_active);
         p.on_start_search();
         assert!(p.search_active);
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn text_insert_at_cursor() {
+        let mut p = widget(&["id"]);
+        p.on_text_input(key(KeyCode::Char('a')));
+        p.on_text_input(key(KeyCode::Char('b')));
+        p.on_text_input(key(KeyCode::Char('c')));
+        assert_eq!(p.search, "abc");
+        assert_eq!(p.search_cursor, 3);
+
+        // Move left, insert in the middle
+        p.on_text_input(key(KeyCode::Left));
+        p.on_text_input(key(KeyCode::Left));
+        assert_eq!(p.search_cursor, 1);
+        p.on_text_input(key(KeyCode::Char('x')));
+        assert_eq!(p.search, "axbc");
+        assert_eq!(p.search_cursor, 2);
+    }
+
+    #[test]
+    fn text_cursor_left_right_bounds() {
+        let mut p = widget(&["id"]);
+        // Left on empty does nothing
+        p.on_text_input(key(KeyCode::Left));
+        assert_eq!(p.search_cursor, 0);
+
+        p.on_text_input(key(KeyCode::Char('a')));
+        // Right past end does nothing
+        p.on_text_input(key(KeyCode::Right));
+        assert_eq!(p.search_cursor, 1);
+
+        p.on_text_input(key(KeyCode::Left));
+        assert_eq!(p.search_cursor, 0);
+    }
+
+    #[test]
+    fn text_backspace_at_cursor() {
+        let mut p = widget(&["id"]);
+        p.search = "abcd".into();
+        p.search_cursor = 2; // between b and c
+
+        p.on_text_input(key(KeyCode::Backspace));
+        assert_eq!(p.search, "acd");
+        assert_eq!(p.search_cursor, 1);
+
+        // Backspace at start does nothing
+        p.search_cursor = 0;
+        p.on_text_input(key(KeyCode::Backspace));
+        assert_eq!(p.search, "acd");
+        assert_eq!(p.search_cursor, 0);
+    }
+
+    #[test]
+    fn text_delete_at_cursor() {
+        let mut p = widget(&["id"]);
+        p.search = "abcd".into();
+        p.search_cursor = 1; // on 'b'
+
+        p.on_text_input(key(KeyCode::Delete));
+        assert_eq!(p.search, "acd");
+        assert_eq!(p.search_cursor, 1); // cursor stays
+
+        // Delete at end does nothing
+        p.search_cursor = p.search.len();
+        p.on_text_input(key(KeyCode::Delete));
+        assert_eq!(p.search, "acd");
+    }
+
+    #[test]
+    fn text_ctrl_left_right_word_movement() {
+        let mut p = widget(&["id"]);
+        p.search = "foo bar baz".into();
+        p.search_cursor = p.search.len(); // at end
+
+        p.on_text_input(ctrl_key(KeyCode::Left)); // to start of "baz"
+        assert_eq!(p.search_cursor, 8);
+
+        p.on_text_input(ctrl_key(KeyCode::Left)); // to start of "bar"
+        assert_eq!(p.search_cursor, 4);
+
+        p.on_text_input(ctrl_key(KeyCode::Left)); // to start of "foo"
+        assert_eq!(p.search_cursor, 0);
+
+        p.on_text_input(ctrl_key(KeyCode::Left)); // already at start
+        assert_eq!(p.search_cursor, 0);
+
+        p.on_text_input(ctrl_key(KeyCode::Right)); // to end of "foo"
+        assert_eq!(p.search_cursor, 3);
+
+        p.on_text_input(ctrl_key(KeyCode::Right)); // to end of "bar"
+        assert_eq!(p.search_cursor, 7);
+
+        p.on_text_input(ctrl_key(KeyCode::Right)); // to end of "baz"
+        assert_eq!(p.search_cursor, 11);
+    }
+
+    #[test]
+    fn scroll_clamps_on_navigate() {
+        let mut p = widget(&["a", "b", "c", "d", "e"]);
+        p.viewport_height = Some(2);
+
+        p.on_navigate_down(); // cursor=1, scroll should stay 0
+        assert_eq!(p.cursor, 1);
+        assert_eq!(p.scroll, 0);
+
+        p.on_navigate_down(); // cursor=2, should scroll
+        assert_eq!(p.cursor, 2);
+        assert_eq!(p.scroll, 1);
+
+        p.on_navigate_up();
+        p.on_navigate_up(); // cursor=0, scroll should follow
+        assert_eq!(p.cursor, 0);
+        assert_eq!(p.scroll, 0);
+    }
+
+    #[test]
+    fn scroll_noop_without_viewport() {
+        let mut p = widget(&["a", "b", "c"]);
+        // viewport_height is None
+        p.on_navigate_down();
+        p.on_navigate_down();
+        assert_eq!(p.cursor, 2);
+        assert_eq!(p.scroll, 0); // no clamping happened
     }
 }
