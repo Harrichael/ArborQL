@@ -32,8 +32,6 @@ pub enum Mode {
     Error(String),
     /// Informational message displayed.
     Info(String),
-    /// User is viewing the internal log history.
-    LogViewer { cursor: usize },
     /// User is doing a reverse-i-search through command history.
     CommandSearch {
         /// The search query typed so far.
@@ -99,6 +97,8 @@ pub struct AppState {
     pub conn_manager: Option<crate::app::connection_manager::widget::ConnManagerWidget>,
     /// Virtual FK manager overlay state, if open.
     pub vfk_manager: Option<crate::app::virtual_fk_manager::widget::VfkWidget>,
+    /// Log viewer overlay state, if open.
+    pub log_viewer: Option<crate::app::log_viewer::widget::LogViewerWidget>,
     /// Virtual FK definitions managed by the user.
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
@@ -151,6 +151,7 @@ impl AppState {
             manuals: None,
             conn_manager: None,
             vfk_manager: None,
+            log_viewer: None,
             virtual_fks: Vec::new(),
             logs: Vec::new(),
             overlay_scroll: 0,

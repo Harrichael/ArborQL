@@ -494,6 +494,17 @@ async fn handle_key(
         }
     }
 
+    // Log viewer overlay has exclusive key handling while open.
+    if let Some(ref mut widget) = state.log_viewer {
+        if let Some(event) = from_key_event(key, &widget.focus_loci()) {
+            dispatch(widget, event);
+        }
+        if widget.closed {
+            state.log_viewer = None;
+        }
+        return Ok(true);
+    }
+
     // The ConnectionManager implements Database, so we can use it as &dyn Database.
     // Placed after overlay handlers because those need &mut conn_mgr.
     let db: &dyn db::Database = conn_mgr;
@@ -771,7 +782,9 @@ async fn handle_key(
                             ));
                         }
                         Some("logs") => {
-                            state.mode = Mode::LogViewer { cursor: state.logs.len().saturating_sub(1) };
+                            state.log_viewer = Some(
+                                app::log_viewer::widget::LogViewerWidget::new(state.logs.clone())
+                            );
                         }
                         Some("manuals") => {
                             state.manuals = Some(app::manuals_manager::widget::ManualsWidget::new());
@@ -893,27 +906,6 @@ async fn handle_key(
         Mode::Error(_) | Mode::Info(_) => {
             state.mode = Mode::Normal;
         }
-
-        // ── Log viewer ───────────────────────────────────────────────────
-        Mode::LogViewer { cursor } => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => {
-                    state.mode = Mode::Normal;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if cursor > 0 {
-                        state.mode = Mode::LogViewer { cursor: cursor - 1 };
-                    }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if cursor + 1 < state.logs.len() {
-                        state.mode = Mode::LogViewer { cursor: cursor + 1 };
-                    }
-                }
-                _ => {}
-            }
-        }
-
 
         // ── Confirm dialog ──────────────────────────────────────────────
         Mode::Confirm { tag, .. } => {

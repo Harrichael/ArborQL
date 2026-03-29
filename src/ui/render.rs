@@ -49,7 +49,6 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     // Render overlays
     match &state.mode {
         Mode::PathSelection => render_path_selection(f, state),
-        Mode::LogViewer { .. } => render_log_viewer(f, state),
         Mode::Confirm { message, .. } => {
             let message = message.clone();
             render_overlay_message(f, &message, Color::Yellow);
@@ -88,6 +87,11 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     // Render virtual FK manager overlay
     if let Some(ref widget) = state.vfk_manager {
         crate::app::virtual_fk_manager::render::render(f, widget);
+    }
+
+    // Render log viewer overlay
+    if let Some(ref widget) = state.log_viewer {
+        crate::app::log_viewer::render::render(f, widget);
     }
 }
 
@@ -470,71 +474,4 @@ fn render_overlay_message(f: &mut Frame, message: &str, color: Color) {
 // Shared render utilities re-exported from ui::model::render.
 use crate::ui::model::render::{centered_rect, render_search_bar};
 
-fn render_log_viewer(f: &mut Frame, state: &AppState) {
-    let area = centered_rect(80, 70, f.area());
-    f.render_widget(Clear, area);
-
-    let cursor = match &state.mode {
-        Mode::LogViewer { cursor } => *cursor,
-        _ => 0,
-    };
-
-    let items: Vec<ListItem> = state
-        .logs
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let level_color = match entry.level {
-                crate::log::LogLevel::Error => Color::Red,
-                crate::log::LogLevel::Warn => Color::Yellow,
-                crate::log::LogLevel::Info => Color::White,
-            };
-            let line = Line::from(Span::styled(
-                entry.to_string(),
-                Style::default().fg(level_color),
-            ));
-            if i == cursor {
-                ListItem::new(line)
-                    .style(Style::default().bg(Color::DarkGray))
-            } else {
-                ListItem::new(line)
-            }
-        })
-        .collect();
-
-    let title = if state.logs.is_empty() {
-        " Log History — empty (Esc close) ".to_string()
-    } else {
-        format!(
-            " Log History ({}/{})  ↑↓/jk navigate  Esc close ",
-            cursor + 1,
-            state.logs.len()
-        )
-    };
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow)),
-        );
-
-    // Scroll so cursor is visible
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let offset = if state.logs.is_empty() {
-        0
-    } else if cursor + 1 > inner_height {
-        cursor + 1 - inner_height
-    } else {
-        0
-    };
-
-    use ratatui::widgets::ListState;
-    let mut list_state = ListState::default();
-    list_state.select(Some(cursor));
-    *list_state.offset_mut() = offset;
-
-    f.render_stateful_widget(list, area, &mut list_state);
-}
 
