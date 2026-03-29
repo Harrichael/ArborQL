@@ -28,10 +28,6 @@ pub enum Mode {
     CommandPalette,
     /// User is being asked to pick among multiple paths.
     PathSelection,
-    /// Error message displayed.
-    Error(String),
-    /// Informational message displayed.
-    Info(String),
     /// User is doing a reverse-i-search through command history.
     CommandSearch {
         /// The search query typed so far.
@@ -40,12 +36,6 @@ pub enum Mode {
         match_cursor: usize,
         /// Input buffer saved before entering search mode (restored on Esc).
         saved_input: String,
-    },
-    /// Confirmation dialog: user must pick y/n.
-    Confirm {
-        message: String,
-        /// What to do on Yes/No — stored as an opaque tag the handler interprets.
-        tag: ConfirmAction,
     },
 }
 
@@ -99,6 +89,10 @@ pub struct AppState {
     pub vfk_manager: Option<crate::app::virtual_fk_manager::widget::VfkWidget>,
     /// Log viewer overlay state, if open.
     pub log_viewer: Option<crate::app::log_viewer::widget::LogViewerWidget>,
+    /// Error/Info message overlay, if open.
+    pub error_info: Option<crate::app::data_playground::widgets::error_info::ErrorInfoWidget>,
+    /// Confirmation dialog overlay, if open.
+    pub confirm: Option<crate::app::data_playground::widgets::confirm::ConfirmWidget>,
     /// Virtual FK definitions managed by the user.
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
@@ -150,6 +144,8 @@ impl AppState {
             conn_manager: None,
             vfk_manager: None,
             log_viewer: None,
+            error_info: None,
+            confirm: None,
             virtual_fks: Vec::new(),
             logs: Vec::new(),
             overlay_scroll: 0,

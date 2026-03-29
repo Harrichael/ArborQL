@@ -49,19 +49,23 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
     // Render overlays
     match &state.mode {
         Mode::PathSelection => render_path_selection(f, state),
-        Mode::Confirm { message, .. } => {
-            let message = message.clone();
-            render_overlay_message(f, &message, Color::Yellow);
-        }
-        Mode::Error(msg) => {
-            let msg = msg.clone();
-            render_overlay_message(f, &format!("Error: {}", msg), Color::Red);
-        }
-        Mode::Info(msg) => {
-            let msg = msg.clone();
-            render_overlay_message(f, &msg, Color::Green);
-        }
         _ => {}
+    }
+
+    // Render error/info overlay
+    if let Some(ref widget) = state.error_info {
+        let color = if widget.is_error { Color::Red } else { Color::Green };
+        let msg = if widget.is_error {
+            format!("Error: {}", widget.message)
+        } else {
+            widget.message.clone()
+        };
+        render_overlay_message(f, &msg, color);
+    }
+
+    // Render confirm overlay
+    if let Some(ref widget) = state.confirm {
+        render_overlay_message(f, &widget.message, Color::Yellow);
     }
 
     // Render column-add overlay
