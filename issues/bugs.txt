@@ -1,0 +1,66 @@
+# Bugs Found During UI Refactoring Review
+# Date: 2026-03-29
+
+## HIGH
+
+### 1. Connection Manager: has_password check uses URL heuristic instead of params
+File: src/app/connection_manager/control_panel.rs:196-201
+The widget's on_save() checks `self.connections[self.cursor].url.contains("password")`
+but ConnectionSummary only has a `url` field, not the `params` HashMap. The old code
+called `conn.has_password()` which checks params["password"].is_empty(). MySQL URLs
+always contain "@" even with empty passwords, causing false positives.
+Fix: Either add `has_password: bool` to ConnectionSummary, or move the check to
+widget_dispatch.rs where conn_mgr.connections[idx] is available.
+
+### 2. InputFocus::Idle is never constructed
+File: src/app/tui/keys.rs:10
+The Idle variant was designed for Normal/Query mode (j/k nav + char→TextInput fallback)
+but no widget or mode ever sets InputFocus::Idle. Normal and Query modes bypass the
+FocusLoci system entirely — they use raw KeyCode matching in key_handler.rs. This is
+working correctly (the modes don't use ControlPanel) but Idle is dead code.
+Fix: Remove Idle variant, or use it when Normal/Query modes eventually become widgets.
+
+## MEDIUM
+
+### 3. Dead overlay_scroll/overlay_search/overlay_search_active fields
+File: src/app/data_playground/state.rs:60-64, 234-237
+These fields and reset_overlay_search() are unused after all overlays were moved to
+widgets with their own search state. Compiler warns about them.
+Fix: Remove the fields and the method.
+
+### 4. VFK Manager: dual cursor (self.cursor vs form.cursor)
+File: src/app/virtual_fk_manager/control_panel.rs
+The widget has self.cursor (used for dropdown_items indexing) and form.cursor (stored
+in the form struct). Both are kept in sync manually but the pattern is fragile — some
+paths set form.cursor first then self.cursor, others vice versa. If they desync, the
+wrong dropdown item gets selected.
+Fix: Use only self.cursor for the dropdown; remove form.cursor or make it derived.
+
+### 5. UserKeyEvent::Quit variant is never constructed
+File: src/app/tui/keys.rs:54
+After removing q→Quit from Overlay/Editable focus mappings, nothing maps to Quit.
+The variant and on_quit() trait method are dead code.
+Fix: Remove Quit variant, on_quit() from ControlPanel, and its dispatch arm.
+
+### 6. Connection Manager save failure doesn't allow retry
+File: src/app/data_playground/widget_dispatch.rs:210-218
+When SaveConnection fails, `state.conn_manager = None` closes the overlay, then
+error_info shows the error. User must re-open connection manager to retry.
+Old code stayed in the ConnectionManager mode on failure.
+Fix: Don't close conn_manager on save failure; show error_info as an overlay on top.
+
+## LOW
+
+### 7. Stale conn_index in ConfirmAction
+File: src/app/data_playground/widget_dispatch.rs:190-204
+SaveConnectionWithPassword stores conn_index. If the user somehow adds/removes
+connections between the confirm prompt and the answer, the index could be stale.
+Extremely unlikely in practice since the confirm dialog blocks input.
+
+### 8. Compiler warnings: 26 total
+Many unused imports and dead code warnings accumulated during refactoring. Not bugs
+but should be cleaned up. Key ones:
+- key_handler.rs: unused imports (config, ErrorInfoWidget)
+- connection_manager: unused EntityFocus, Rect imports
+- manuals_manager: unused Rect import
+- mod.rs: unused re-exports (AppState, ConfirmAction, Mode, PALETTE_COMMANDS)
