@@ -4,7 +4,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::app::connection_manager::widget::ConnManagerWidget;
 use crate::app::virtual_fk_manager::widget::VfkWidget;
 use crate::command_history;
-use crate::config;
 use crate::db;
 use crate::engine::{self, flatten_tree};
 use crate::rules::{self, Completion};
@@ -13,7 +12,6 @@ use super::types::{Mode, PALETTE_COMMANDS};
 use super::module::{
     columns_for_table, execute_command, insert_rule_at_next_cursor, saved_ids, toggle_fold,
 };
-use super::widgets::error_info::ErrorInfoWidget;
 use super::{DataPlayground, TickResult};
 
 /// Handle a key event in the context of the current Mode.

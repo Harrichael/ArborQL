@@ -183,10 +183,6 @@ mod tests {
         }
     }
 
-    fn loci(input: InputFocus, entity: EntityFocus) -> FocusLoci {
-        FocusLoci { input, entity }
-    }
-
     fn event_name(e: &Option<UserKeyEvent>) -> String {
         match e {
             None => "-".to_string(),
@@ -225,12 +221,6 @@ mod tests {
                 },
             },
         }
-    }
-
-    fn row_values(key_event: KeyEvent, columns: &[(&str, FocusLoci)]) -> Vec<String> {
-        columns.iter()
-            .map(|(_, focus)| event_name(&from_key_event(key_event, focus)))
-            .collect()
     }
 
     fn format_row(label: &str, values: &[String], kw: usize, vw: usize) -> String {
