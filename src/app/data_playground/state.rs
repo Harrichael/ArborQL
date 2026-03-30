@@ -56,12 +56,6 @@ pub struct AppState {
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
     pub logs: Vec<crate::log::LogEntry>,
-    /// Scroll offset shared by all list overlays (column manager, FK manager, etc.).
-    pub overlay_scroll: usize,
-    /// Live search/filter string for list overlays. Empty = no filter.
-    pub overlay_search: String,
-    /// Whether the search input is currently active (accepting keystrokes).
-    pub overlay_search_active: bool,
     /// Entered command history (append-only).
     pub command_history: CommandHistory,
     /// Index into `command_history` while browsing with Up/Down (None = not browsing).
@@ -106,9 +100,6 @@ impl AppState {
             confirm: None,
             virtual_fks: Vec::new(),
             logs: Vec::new(),
-            overlay_scroll: 0,
-            overlay_search: String::new(),
-            overlay_search_active: false,
             command_history: CommandHistory::new(),
             history_cursor: None,
             history_draft: String::new(),
@@ -229,12 +220,6 @@ impl AppState {
                 }
             }
         }
-    }
-
-    pub fn reset_overlay_search(&mut self) {
-        self.overlay_search.clear();
-        self.overlay_search_active = false;
-        self.overlay_scroll = 0;
     }
 
     pub fn input_text(&self) -> &str {
