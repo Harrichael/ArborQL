@@ -47,9 +47,6 @@ pub enum UserKeyEvent {
     NextField,
     PrevField,
 
-    // ── Idle + Overlay + Editable ───────────────────────────────────
-    Quit,
-
     // ── Overlay + Editable ──────────────────────────────────────────
     StartSearch,
     Remove,
@@ -204,7 +201,6 @@ mod tests {
                 UserKeyEvent::NavigateDown => "NavDown".into(),
                 UserKeyEvent::NextField => "NxtFld".into(),
                 UserKeyEvent::PrevField => "PrvFld".into(),
-                UserKeyEvent::Quit => "Quit".into(),
                 UserKeyEvent::StartSearch => "StartSrch".into(),
                 UserKeyEvent::Remove => "Remove".into(),
                 UserKeyEvent::AddItem => "AddItem".into(),

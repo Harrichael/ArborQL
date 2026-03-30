@@ -24,7 +24,6 @@ pub trait ControlPanel {
     fn on_prev_field(&mut self) {}
 
     // ── Actions ─────────────────────────────────────────────────────
-    fn on_quit(&mut self) {}
     fn on_start_search(&mut self) {}
     fn on_remove(&mut self) {}
     fn on_add_item(&mut self) {}
@@ -60,7 +59,6 @@ pub fn dispatch(ctrl_panel: &mut dyn ControlPanel, event: UserKeyEvent) {
         UserKeyEvent::NavigateDown => ctrl_panel.on_navigate_down(),
         UserKeyEvent::NextField => ctrl_panel.on_next_field(),
         UserKeyEvent::PrevField => ctrl_panel.on_prev_field(),
-        UserKeyEvent::Quit => ctrl_panel.on_quit(),
         UserKeyEvent::StartSearch => ctrl_panel.on_start_search(),
         UserKeyEvent::Remove => ctrl_panel.on_remove(),
         UserKeyEvent::AddItem => ctrl_panel.on_add_item(),
