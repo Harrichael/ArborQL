@@ -211,7 +211,7 @@ pub(super) async fn dispatch_widgets(
                                 state.error_info = Some(ErrorInfoWidget::info(info));
                             }
                             Err(e) => {
-                                state.conn_manager = None;
+                                // Keep conn_manager open so user can retry
                                 state.error_info = Some(ErrorInfoWidget::error(format!("Save failed: {}", e)));
                             }
                         }
