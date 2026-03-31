@@ -444,7 +444,7 @@ async fn handle_key(
         Mode::Normal => {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(false),
-                KeyCode::Char(':') => {
+                KeyCode::Char('>') => {
                     state.mode = Mode::Command;
                     state.clear_input();
                     state.history_cursor = None;

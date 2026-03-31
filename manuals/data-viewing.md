@@ -73,10 +73,10 @@ At the bottom of the screen the status bar shows:
 When no rules have been executed the tree is empty and the viewer shows:
 
 ```
-Data Viewer (empty — type ':' to enter a command)
+Data Viewer (empty — type '>' to enter a command)
 ```
 
-Enter a Filter rule (`:` then `<table> where ...`) to load data.
+Enter a Filter rule (`>` then `<table> where ...`) to load data.
 
 
 ## Pruning Nodes

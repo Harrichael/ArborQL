@@ -1,7 +1,7 @@
 # Command Querying Syntax
 
 LatticeQL uses a concise, natural-language-like grammar instead of SQL. Commands
-are entered by pressing `:` to open Command mode, typing a rule, then pressing
+are entered by pressing `>` to open Command mode, typing a rule, then pressing
 `Enter` to execute it.
 
 There are three rule types: Filter, Relation, and Prune.
