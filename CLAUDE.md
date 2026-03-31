@@ -59,7 +59,7 @@ The engine holds an ordered list of rules. Re-executing them in order from scrat
 
 | Key | Action |
 |-----|--------|
-| `:` | Enter command mode |
+| `/` | Enter command mode |
 | `j` / `↓` | Select next row |
 | `k` / `↑` | Select previous row |
 | `f` / `Enter` | Toggle fold |

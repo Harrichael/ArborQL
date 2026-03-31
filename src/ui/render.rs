@@ -204,7 +204,7 @@ fn render_data_viewer(
     };
 
     let title = if flat.is_empty() {
-        " Data Viewer (empty — type '>' to enter a command) ".to_string()
+        " Data Viewer (empty — type '/' to enter a command) ".to_string()
     } else {
         format!(
             " Data Viewer [{}/{}] ",
@@ -249,7 +249,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
             .split(inner);
 
         // Input line
-        let cmd_para = Paragraph::new(format!("> {}", state.input))
+        let cmd_para = Paragraph::new(format!("/ {}", state.input))
             .style(Style::default().fg(Color::White));
         f.render_widget(cmd_para, rows[0]);
 
@@ -257,14 +257,15 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         let completions = completions_at(&state.input, &state.completion_table_names(), &state.table_columns);
         if !completions.is_empty() {
             let hint = format_completions(&completions);
-            let hint_para = Paragraph::new(hint)
+            // 2-char indent to align with input text after '/ '
+            let hint_para = Paragraph::new(format!("  {}", hint))
                 .style(Style::default().fg(Color::DarkGray));
             f.render_widget(hint_para, rows[1]);
         }
 
         // Place the cursor on the input line.
         f.set_cursor_position((
-            area.x + 1 + 2 + state.cursor as u16, // +1 border, +2 for '> '
+            area.x + 1 + 2 + state.cursor as u16, // +1 border, +2 for '/ '
             area.y + 1,
         ));
     } else if let Mode::CommandSearch { ref query, match_cursor, .. } = state.mode {
@@ -312,7 +313,7 @@ fn render_command_bar(f: &mut Frame, state: &AppState, area: Rect) {
         let (title, display) = match &state.mode {
             Mode::Normal => (
                 " LatticeQL ",
-                " '>' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  '+' connections  'm' manuals  'l' logs  'q' quit",
+                " '/' command  'j/k' navigate  'f' fold  's' schema  'c' columns  'v' virtual FKs  'r' reorder  '+' connections  'm' manuals  'l' logs  'q' quit",
             ),
             _ => (" LatticeQL ", ""),
         };
