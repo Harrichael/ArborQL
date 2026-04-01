@@ -23,7 +23,6 @@ use std::io;
 use connection_manager::{ConnectionManager, ConnectionType};
 use ui::app::{AppState, ColumnManagerItem, ConfirmAction, ConnectionForm, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
 use ui::select_list::SelectList;
-use schema::VirtualFkDef;
 
 /// LatticeQL — Navigate complex datasets from multiple sources intuitively.
 #[derive(Parser, Debug)]
@@ -1116,14 +1115,7 @@ async fn handle_key(
                                     VirtualFkField::ToColumn => {
                                         f.to_column = raw_value;
                                         if f.is_complete() {
-                                            let vfk = VirtualFkDef {
-                                                from_table: f.from_table.clone(),
-                                                type_column: if f.type_column.is_empty() { None } else { Some(f.type_column.clone()) },
-                                                type_value: if f.type_value.is_empty() { None } else { Some(f.type_value.clone()) },
-                                                id_column: f.id_column.clone(),
-                                                to_table: f.to_table.clone(),
-                                                to_column: f.to_column.clone(),
-                                            };
+                                            let vfk = f.to_vfk_def();
                                             state.virtual_fks.push(vfk.clone());
                                             engine.schema.virtual_fks.push(vfk);
                                             let mut mgr_list = SelectList::with_search();
@@ -1155,14 +1147,7 @@ async fn handle_key(
                 // ── Ctrl+S: commit + save when form is complete ────────
                 KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                     if form.is_complete() {
-                        let vfk = VirtualFkDef {
-                            from_table: form.from_table.clone(),
-                            type_column: if form.type_column.is_empty() { None } else { Some(form.type_column.clone()) },
-                            type_value: if form.type_value.is_empty() { None } else { Some(form.type_value.clone()) },
-                            id_column: form.id_column.clone(),
-                            to_table: form.to_table.clone(),
-                            to_column: form.to_column.clone(),
-                        };
+                        let vfk = form.to_vfk_def();
                         state.virtual_fks.push(vfk.clone());
                         engine.schema.virtual_fks.push(vfk);
                         match config::save_virtual_fks(&state.virtual_fks) {

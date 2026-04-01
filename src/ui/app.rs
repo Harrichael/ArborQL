@@ -2,7 +2,7 @@ use crate::command_history::CommandHistory;
 use crate::connection_manager::ConnectionType;
 use crate::rules::Rule;
 use crate::engine::TablePath;
-use crate::schema::VirtualFkDef;
+use crate::schema::{self, VirtualFkDef};
 use crate::ui::select_list::SelectList;
 use std::collections::HashMap;
 
@@ -109,6 +109,19 @@ impl VirtualFkForm {
             && !self.id_column.is_empty()
             && !self.to_table.is_empty()
             && !self.to_column.is_empty()
+    }
+
+    /// Build a `VirtualFkDef` from the form's current field values.
+    /// Empty type_column/type_value are mapped to `None`.
+    pub fn to_vfk_def(&self) -> schema::VirtualFkDef {
+        VirtualFkDef {
+            from_table: self.from_table.clone(),
+            type_column: if self.type_column.is_empty() { None } else { Some(self.type_column.clone()) },
+            type_value: if self.type_value.is_empty() { None } else { Some(self.type_value.clone()) },
+            id_column: self.id_column.clone(),
+            to_table: self.to_table.clone(),
+            to_column: self.to_column.clone(),
+        }
     }
 }
 

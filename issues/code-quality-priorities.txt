@@ -1,0 +1,47 @@
+## Code Quality Priorities
+
+### P1
+
+1. `match state.mode.clone()` on every keypress (main.rs:442)
+   Clones the entire Mode enum each key event, including SelectList (String)
+   and VirtualFkForm. Fix: switch to `match &mut state.mode` with borrowing,
+   which requires refactoring to avoid borrow conflicts with other state fields.
+
+2. main.rs is ~1700 lines and growing
+   All key handling lives in one giant handle_key function. Each new Mode adds
+   another arm. Pull each mode's handler into its own function/method. This
+   also helps with the clone issue above.
+
+### P2
+
+3. render.rs mirrors the main.rs problem (~1300 lines)
+   Repeated patterns like extracting mode fields at the top of each render
+   function. Rendering functions could be methods on Mode or SelectList.
+
+4. rule_reorder_undo stores full Vec<Rule> snapshots
+   Every swap/delete clones the entire rules list. Undo stack is unbounded.
+   A command-based undo (storing the operation) would be leaner.
+
+5. DataNode mixes data and UI concerns
+   Carries visible_columns and collapsed alongside table/row/children. The
+   engine layer knows about display concerns, blocking clean serialization
+   or isolated engine testing.
+
+### P3
+
+6. TextInput abstraction
+   4 duplicated input buffers (command input, overlay_search, CommandSearch
+   query, SavedConnectionAlias alias) each with their own char/backspace/
+   cursor logic. A TextInput struct would consolidate them.
+
+7. UndoStack<T> abstraction
+   Generic version of rule_reorder_undo/redo. Would apply if undo is added
+   to column ordering or virtual FK edits.
+
+8. ConnectionManager tab-switching loses cursor position
+   Switching tabs reconstructs SelectList::new(), losing cursor. Could store
+   a SelectList per tab.
+
+9. VirtualFkForm duplicated VirtualFkDef construction
+   Same struct literal appears in both the Enter path and the Ctrl+S path.
+   A form.to_vfk_def() method would deduplicate.
