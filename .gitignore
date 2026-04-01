@@ -21,6 +21,9 @@ target
 #.idea/
 
 
+# Generated sample databases
+samples/gen/
+
 # Added by cargo
 
 /target
