@@ -434,235 +434,219 @@ async fn handle_key(
         return Ok(true);
     }
 
-    match state.mode.clone() {
-        // ── Normal mode ──────────────────────────────────────────────────
-        Mode::Normal => {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(false),
-                KeyCode::Char('/') => {
-                    state.mode = Mode::Command;
-                    state.clear_input();
-                    state.history_cursor = None;
-                    state.history_draft = String::new();
-                }
-                KeyCode::Char('j') | KeyCode::Down => state.select_down(),
-                KeyCode::Char('k') | KeyCode::Up => state.select_up(),
-                KeyCode::Char('f') | KeyCode::Enter => {
-                    // Toggle fold on selected node
-                    let flat = flatten_tree(&engine.roots);
-                    if state.selected_row < flat.len() {
-                        toggle_fold(&mut engine.roots, state.selected_row);
-                    }
-                }
-                KeyCode::Char('s') => {
-                    state.show_schema = !state.show_schema;
-                }
-                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+R from Normal mode: jump straight into reverse command search.
-                    state.clear_input();
-                    state.history_cursor = None;
-                    state.mode = Mode::CommandSearch {
-                        query: String::new(),
-                        match_cursor: 0,
-                        saved_input: String::new(),
-                    };
-                }
-                KeyCode::Char('r') => {
-                    if !engine.rules.is_empty() {
-                        state.rules = engine.rules.clone();
-                        state.next_rule_cursor =
-                            state.next_rule_cursor.min(state.rules.len());
-                        state.rule_reorder_undo.clear();
-                        state.rule_reorder_redo.clear();
-                        state.mode = Mode::RuleReorder { list: SelectList::new() };
-                    }
-                }
-                KeyCode::Char('c') => {
-                    // Manage table-level tree columns for selected node's table.
-                    let flat = flatten_tree(&engine.roots);
-                    if state.selected_row < flat.len() {
-                        let (_, node) = flat[state.selected_row];
-                        ensure_tree_visibility_for_node(state, node);
-                        let items = column_manager_items_for_table(
-                            state,
-                            &engine.roots,
-                            &node.table,
-                        );
-                        if !items.is_empty() {
-                            state.column_add = Some((node.table.clone(), items, SelectList::with_search()));
-                        }
-                    }
-                }
-                KeyCode::Char('v') => {
-                    state.mode = Mode::VirtualFkManager { list: SelectList::with_search() };
-                }
-                KeyCode::Char('x') => {
-                    // Prune (remove) the currently selected node from the tree.
-                    let flat = flatten_tree(&engine.roots);
-                    if state.selected_row < flat.len() {
-                        let (_, node) = flat[state.selected_row];
-                        let table = node.table.clone();
-                        // Find primary key column; fall back to "id".
-                        let pk_col = engine
-                            .schema
-                            .tables
-                            .get(&table)
-                            .and_then(|info| {
-                                info.columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone())
-                            })
-                            .unwrap_or_else(|| "id".to_string());
-                        if let Some(pk_val) = node.row.get(&pk_col) {
-                            let conditions = vec![rules::Condition {
-                                column: pk_col,
-                                op: rules::Op::Eq,
-                                value: pk_val.to_string(),
-                            }];
-                            let rule = rules::Rule::Prune {
-                                table: table.clone(),
-                                conditions: conditions.clone(),
-                            };
-                            insert_rule_at_next_cursor(state, engine, rule);
-                            // Prune is in-memory: apply directly without re-fetching from DB.
-                            engine.apply_prune_rule(&table, &conditions);
-                        }
-                    }
-                }
-                KeyCode::Char('l') => {
-                    let mut list = SelectList::new();
-                    list.cursor = state.logs.len().saturating_sub(1);
-                    state.mode = Mode::LogViewer { list };
-                }
-                KeyCode::Char('m') => {
-                    state.mode = Mode::ManualList { list: SelectList::new() };
-                }
-                KeyCode::Char('+') => {
-                    state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
-                    state.mode = Mode::connection_manager(ConnectionManagerTab::Connections);
-                }
-                _ => {}
+    // ── Normal mode ──────────────────────────────────────────────────
+    // Extracted before the mode match so we can call &mut self methods
+    // on state (select_up, input_char, etc.) without conflicting borrows.
+    if matches!(state.mode, Mode::Normal) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(false),
+            KeyCode::Char('/') => {
+                state.mode = Mode::Command;
+                state.clear_input();
+                state.history_cursor = None;
+                state.history_draft = String::new();
             }
-        }
-
-        // ── Command mode ─────────────────────────────────────────────────
-        Mode::Command => {
-            match key.code {
-                KeyCode::Esc => {
-                    state.mode = Mode::Normal;
-                    state.clear_input();
-                    state.history_cursor = None;
-                    state.history_draft = String::new();
+            KeyCode::Char('j') | KeyCode::Down => state.select_down(),
+            KeyCode::Char('k') | KeyCode::Up => state.select_up(),
+            KeyCode::Char('f') | KeyCode::Enter => {
+                let flat = flatten_tree(&engine.roots);
+                if state.selected_row < flat.len() {
+                    toggle_fold(&mut engine.roots, state.selected_row);
                 }
-                KeyCode::Enter => {
-                    let cmd = state.input_text().trim().to_string();
-                    // Determine whether this command should be recorded.
-                    // If the user navigated to a history entry and runs it
-                    // unchanged, do not append it again.
-                    // Both `cmd` and `e.text` are trimmed, so the comparison
-                    // is between two normalised strings.
-                    let navigated_unchanged = state
-                        .history_cursor
-                        .and_then(|i| state.command_history.entries().get(i))
-                        .map(|e| e.text == cmd)
-                        .unwrap_or(false);
-                    if !navigated_unchanged {
-                        if state.command_history.push(cmd.clone()) {
-                            if let Some(ref path) = history_file {
-                                if let Some(entry) = state.command_history.entries().last() {
-                                    if let Err(e) = command_history::CommandHistory::append_to_file(entry, path) {
-                                        crate::log::warn(format!("could not save command history: {}", e));
-                                    }
+            }
+            KeyCode::Char('s') => {
+                state.show_schema = !state.show_schema;
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.clear_input();
+                state.history_cursor = None;
+                state.mode = Mode::CommandSearch {
+                    query: String::new(),
+                    match_cursor: 0,
+                    saved_input: String::new(),
+                };
+            }
+            KeyCode::Char('r') => {
+                if !engine.rules.is_empty() {
+                    state.rules = engine.rules.clone();
+                    state.next_rule_cursor =
+                        state.next_rule_cursor.min(state.rules.len());
+                    state.rule_reorder_undo.clear();
+                    state.rule_reorder_redo.clear();
+                    state.mode = Mode::RuleReorder { list: SelectList::new() };
+                }
+            }
+            KeyCode::Char('c') => {
+                let flat = flatten_tree(&engine.roots);
+                if state.selected_row < flat.len() {
+                    let (_, node) = flat[state.selected_row];
+                    ensure_tree_visibility_for_node(state, node);
+                    let items = column_manager_items_for_table(
+                        state,
+                        &engine.roots,
+                        &node.table,
+                    );
+                    if !items.is_empty() {
+                        state.column_add = Some((node.table.clone(), items, SelectList::with_search()));
+                    }
+                }
+            }
+            KeyCode::Char('v') => {
+                state.mode = Mode::VirtualFkManager { list: SelectList::with_search() };
+            }
+            KeyCode::Char('x') => {
+                let flat = flatten_tree(&engine.roots);
+                if state.selected_row < flat.len() {
+                    let (_, node) = flat[state.selected_row];
+                    let table = node.table.clone();
+                    let pk_col = engine
+                        .schema
+                        .tables
+                        .get(&table)
+                        .and_then(|info| {
+                            info.columns.iter().find(|c| c.is_primary_key).map(|c| c.name.clone())
+                        })
+                        .unwrap_or_else(|| "id".to_string());
+                    if let Some(pk_val) = node.row.get(&pk_col) {
+                        let conditions = vec![rules::Condition {
+                            column: pk_col,
+                            op: rules::Op::Eq,
+                            value: pk_val.to_string(),
+                        }];
+                        let rule = rules::Rule::Prune {
+                            table: table.clone(),
+                            conditions: conditions.clone(),
+                        };
+                        insert_rule_at_next_cursor(state, engine, rule);
+                        engine.apply_prune_rule(&table, &conditions);
+                    }
+                }
+            }
+            KeyCode::Char('l') => {
+                let mut list = SelectList::new();
+                list.cursor = state.logs.len().saturating_sub(1);
+                state.mode = Mode::LogViewer { list };
+            }
+            KeyCode::Char('m') => {
+                state.mode = Mode::ManualList { list: SelectList::new() };
+            }
+            KeyCode::Char('+') => {
+                state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
+                state.mode = Mode::connection_manager(ConnectionManagerTab::Connections);
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    // ── Command mode ─────────────────────────────────────────────────
+    if matches!(state.mode, Mode::Command) {
+        match key.code {
+            KeyCode::Esc => {
+                state.mode = Mode::Normal;
+                state.clear_input();
+                state.history_cursor = None;
+                state.history_draft = String::new();
+            }
+            KeyCode::Enter => {
+                let cmd = state.input_text().trim().to_string();
+                let navigated_unchanged = state
+                    .history_cursor
+                    .and_then(|i| state.command_history.entries().get(i))
+                    .map(|e| e.text == cmd)
+                    .unwrap_or(false);
+                if !navigated_unchanged {
+                    if state.command_history.push(cmd.clone()) {
+                        if let Some(ref path) = history_file {
+                            if let Some(entry) = state.command_history.entries().last() {
+                                if let Err(e) = command_history::CommandHistory::append_to_file(entry, path) {
+                                    crate::log::warn(format!("could not save command history: {}", e));
                                 }
                             }
                         }
                     }
+                }
+                state.history_cursor = None;
+                state.history_draft = String::new();
+                state.mode = Mode::Normal;
+                state.clear_input();
+                if !cmd.is_empty() {
+                    execute_command(cmd, state, engine, db, pending_paths).await?;
+                }
+            }
+            KeyCode::Up => state.history_up(),
+            KeyCode::Down => state.history_down(),
+            KeyCode::Tab => {
+                let completions = rules::completions_at(
+                    &state.input,
+                    &state.completion_table_names(),
+                    &state.table_columns,
+                );
+                if completions.len() == 1 {
+                    if let Completion::Token(ref s) = completions[0] {
+                        let (_, partial) =
+                            rules::tokenize_partial(&state.input);
+                        let prefix_len = state.input.len() - partial.len();
+                        state.input =
+                            format!("{}{} ", &state.input[..prefix_len], s);
+                        state.cursor = state.input.len();
+                        state.history_cursor = None;
+                    }
+                }
+            }
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                match c {
+                    'c' => return Ok(false),
+                    'r' => {
+                        let saved = state.input.clone();
+                        state.mode = Mode::CommandSearch {
+                            query: String::new(),
+                            match_cursor: 0,
+                            saved_input: saved,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Char(c) => {
+                state.input_char(c);
+                state.history_cursor = None;
+            }
+            KeyCode::Backspace => {
+                if state.input.is_empty() {
+                    state.mode = Mode::Normal;
                     state.history_cursor = None;
                     state.history_draft = String::new();
-                    state.mode = Mode::Normal;
-                    state.clear_input();
-                    if !cmd.is_empty() {
-                        execute_command(cmd, state, engine, db, pending_paths).await?;
-                    }
-                }
-                // Up/Down: navigate command history.
-                KeyCode::Up => state.history_up(),
-                KeyCode::Down => state.history_down(),
-                // Tab: apply single-option completion.
-                KeyCode::Tab => {
-                    let completions = rules::completions_at(
-                        &state.input,
-                        &state.completion_table_names(),
-                        &state.table_columns,
-                    );
-                    if completions.len() == 1 {
-                        if let Completion::Token(ref s) = completions[0] {
-                            let (_, partial) =
-                                rules::tokenize_partial(&state.input);
-                            let prefix_len = state.input.len() - partial.len();
-                            state.input =
-                                format!("{}{} ", &state.input[..prefix_len], s);
-                            state.cursor = state.input.len();
-                            // Reset history browsing since the input changed.
-                            state.history_cursor = None;
-                        }
-                    }
-                }
-                KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    match c {
-                        'c' => return Ok(false),
-                        'r' => {
-                            // Enter reverse-i-search mode.
-                            let saved = state.input.clone();
-                            state.mode = Mode::CommandSearch {
-                                query: String::new(),
-                                match_cursor: 0,
-                                saved_input: saved,
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Char(c) => {
-                    state.input_char(c);
-                    // Typing resets history browsing position; we're now on
-                    // a modified (or new) command, no longer on the exact
-                    // history entry.
+                } else {
+                    state.input_backspace();
                     state.history_cursor = None;
                 }
-                KeyCode::Backspace => {
-                    if state.input.is_empty() {
-                        // Backspace on empty input exits command mode.
-                        state.mode = Mode::Normal;
-                        state.history_cursor = None;
-                        state.history_draft = String::new();
-                    } else {
-                        state.input_backspace();
-                        state.history_cursor = None;
-                    }
-                }
-                KeyCode::Delete => state.input_delete(),
-                KeyCode::Left => state.cursor_left(),
-                KeyCode::Right => state.cursor_right(),
-                _ => {}
             }
+            KeyCode::Delete => state.input_delete(),
+            KeyCode::Left => state.cursor_left(),
+            KeyCode::Right => state.cursor_right(),
+            _ => {}
         }
+        return Ok(true);
+    }
+
+    match &mut state.mode {
+        Mode::Normal | Mode::Command => unreachable!(), // handled above
 
         // ── Reverse-i-search mode ─────────────────────────────────────────
-        Mode::CommandSearch { query, match_cursor, saved_input } => {
+        Mode::CommandSearch { ref mut query, ref mut match_cursor, ref saved_input } => {
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc => {
-                    // Cancel search: restore the saved input.
                     state.input = saved_input.clone();
                     state.cursor = state.input.len();
                     state.history_cursor = None;
-                    state.mode = Mode::Command;
+                    new_mode = Some(Mode::Command);
                 }
                 KeyCode::Enter => {
-                    // Accept the current match and switch to Command mode.
-                    // The matched command is already in state.input (set while
-                    // rendering), so we just need to switch modes.
                     let matched = state
                         .command_history
-                        .search_reverse(&query, match_cursor)
+                        .search_reverse(query, *match_cursor)
                         .and_then(|i| state.command_history.entries().get(i))
                         .map(|e| e.text.clone());
                     if let Some(text) = matched {
@@ -670,50 +654,34 @@ async fn handle_key(
                         state.cursor = state.input.len();
                     }
                     state.history_cursor = None;
-                    state.mode = Mode::Command;
+                    new_mode = Some(Mode::Command);
                 }
                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match c {
                         'c' => return Ok(false),
-                        'r' => {
-                            // Ctrl+R again: advance to the next older match.
-                            state.mode = Mode::CommandSearch {
-                                query,
-                                match_cursor: match_cursor + 1,
-                                saved_input,
-                            };
-                        }
+                        'r' => { *match_cursor += 1; }
                         _ => {}
                     }
                 }
                 KeyCode::Char(c) => {
-                    // Append to query, reset to most-recent match.
-                    let mut new_query = query.clone();
-                    new_query.push(c);
-                    state.mode = Mode::CommandSearch {
-                        query: new_query,
-                        match_cursor: 0,
-                        saved_input,
-                    };
+                    query.push(c);
+                    *match_cursor = 0;
                 }
                 KeyCode::Backspace => {
-                    let mut new_query = query.clone();
-                    new_query.pop();
-                    state.mode = Mode::CommandSearch {
-                        query: new_query,
-                        match_cursor: 0,
-                        saved_input,
-                    };
+                    query.pop();
+                    *match_cursor = 0;
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Path selection overlay ────────────────────────────────────────
         Mode::PathSelection { ref mut list } => {
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc => {
-                    state.mode = Mode::Normal;
+                    new_mode = Some(Mode::Normal);
                     *pending_paths = None;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -740,9 +708,7 @@ async fn handle_key(
                     let cursor = list.cursor;
                     if let Some((rule, paths)) = pending_paths.take() {
                         let chosen = &paths[cursor];
-                        // Apply the chosen path
                         engine.apply_relation_rule(db, chosen).await?;
-                        // Update rule with the chosen path stored as resolved_path
                         let updated_rule = match rule {
                             rules::Rule::Relation { from_table, to_table, via, .. } => {
                                 let extra_via: Vec<String> = chosen
@@ -764,40 +730,40 @@ async fn handle_key(
                             engine.reexecute_all(db).await?;
                         }
                     }
-                    state.mode = Mode::Normal;
+                    new_mode = Some(Mode::Normal);
                     state.paths.clear();
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Rule reorder overlay ─────────────────────────────────────────
         Mode::RuleReorder { ref mut list } => {
-            let push_rule_reorder_undo = |state: &mut AppState, cursor: usize| {
-                state
-                    .rule_reorder_undo
-                    .push((
-                        state.rules.clone(),
-                        cursor,
-                        state.next_rule_cursor,
+            let mut new_mode: Option<Mode> = None;
+            // Inline undo-push: captures disjoint fields directly.
+            macro_rules! push_undo {
+                ($cursor:expr) => {
+                    state.rule_reorder_undo.push((
+                        state.rules.clone(), $cursor, state.next_rule_cursor,
                     ));
-                state.rule_reorder_redo.clear();
-            };
+                    state.rule_reorder_redo.clear();
+                };
+            }
             match key.code {
                 KeyCode::Esc => {
                     state.rule_reorder_undo.clear();
                     state.rule_reorder_redo.clear();
-                    state.mode = Mode::Normal;
+                    new_mode = Some(Mode::Normal);
                 }
                 KeyCode::Enter => {
-                    // Apply reordered rules
                     engine.rules = state.rules.clone();
                     state.next_rule_cursor =
                         state.next_rule_cursor.min(engine.rules.len());
                     let _ = engine.reexecute_all(db).await;
                     state.rule_reorder_undo.clear();
                     state.rule_reorder_redo.clear();
-                    state.mode = Mode::Normal;
+                    new_mode = Some(Mode::Normal);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     list.move_up();
@@ -806,23 +772,21 @@ async fn handle_key(
                     list.move_down(state.rules.len());
                 }
                 KeyCode::Char('u') => {
-                    // Swap up
                     if let Some((a, b)) = list.move_item_up() {
-                        push_rule_reorder_undo(state, a + 1);
+                        push_undo!(a + 1);
                         state.rules.swap(a, b);
                     }
                 }
                 KeyCode::Char('d') => {
-                    // Swap down
                     let len = state.rules.len();
                     if let Some((a, b)) = list.move_item_down(len) {
-                        push_rule_reorder_undo(state, a);
+                        push_undo!(a);
                         state.rules.swap(a, b);
                     }
                 }
                 KeyCode::Char('x') => {
                     if !state.rules.is_empty() {
-                        push_rule_reorder_undo(state, list.cursor);
+                        push_undo!(list.cursor);
                         state.rules.remove(list.cursor);
                         if state.rules.is_empty() {
                             list.cursor = 0;
@@ -841,13 +805,9 @@ async fn handle_key(
                 }
                 KeyCode::Char('z') => {
                     if let Some((rules, cursor, next_cursor)) = state.rule_reorder_undo.pop() {
-                        state
-                            .rule_reorder_redo
-                            .push((
-                                state.rules.clone(),
-                                list.cursor,
-                                state.next_rule_cursor,
-                            ));
+                        state.rule_reorder_redo.push((
+                            state.rules.clone(), list.cursor, state.next_rule_cursor,
+                        ));
                         state.rules = rules;
                         list.cursor = cursor.min(state.rules.len().saturating_sub(1));
                         state.next_rule_cursor = next_cursor.min(state.rules.len());
@@ -855,13 +815,9 @@ async fn handle_key(
                 }
                 KeyCode::Char('y') => {
                     if let Some((rules, cursor, next_cursor)) = state.rule_reorder_redo.pop() {
-                        state
-                            .rule_reorder_undo
-                            .push((
-                                state.rules.clone(),
-                                list.cursor,
-                                state.next_rule_cursor,
-                            ));
+                        state.rule_reorder_undo.push((
+                            state.rules.clone(), list.cursor, state.next_rule_cursor,
+                        ));
                         state.rules = rules;
                         list.cursor = cursor.min(state.rules.len().saturating_sub(1));
                         state.next_rule_cursor = next_cursor.min(state.rules.len());
@@ -869,6 +825,7 @@ async fn handle_key(
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Error / Info overlays — any key dismisses ────────────────────
@@ -878,9 +835,10 @@ async fn handle_key(
 
         // ── Log viewer ───────────────────────────────────────────────────
         Mode::LogViewer { ref mut list } => {
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => {
-                    state.mode = Mode::Normal;
+                    new_mode = Some(Mode::Normal);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     list.move_up();
@@ -890,6 +848,7 @@ async fn handle_key(
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Virtual FK manager ───────────────────────────────────────────
@@ -900,13 +859,14 @@ async fn handle_key(
                 .map(|(i, _)| i)
                 .collect();
             let flen = filtered.len();
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Up => { list.move_up(); }
                 KeyCode::Char('k') if !list.search_active() => { list.move_up(); }
                 KeyCode::Down => { list.move_down(flen); }
                 KeyCode::Char('j') if !list.search_active() => { list.move_down(flen); }
                 KeyCode::Char('a') if !list.search_active() => {
-                    state.mode = Mode::VirtualFkAdd(VirtualFkForm::new());
+                    new_mode = Some(Mode::VirtualFkAdd(VirtualFkForm::new()));
                 }
                 KeyCode::Char('d') | KeyCode::Char('x') if !list.search_active() => {
                     if let Some(&orig_idx) = filtered.get(list.cursor) {
@@ -917,8 +877,8 @@ async fn handle_key(
                 }
                 KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                     match config::save_virtual_fks(&state.virtual_fks) {
-                        Ok(path) => { state.mode = Mode::Info(format!("Virtual FKs saved to {}", path.display())); }
-                        Err(e) => { state.mode = Mode::Error(format!("Save failed: {}", e)); }
+                        Ok(path) => { new_mode = Some(Mode::Info(format!("Virtual FKs saved to {}", path.display()))); }
+                        Err(e) => { new_mode = Some(Mode::Error(format!("Save failed: {}", e))); }
                     }
                 }
                 KeyCode::Char('/') if !list.search_active() => {
@@ -926,259 +886,199 @@ async fn handle_key(
                 }
                 KeyCode::Esc => {
                     if list.handle_esc() == ui::select_list::EscAction::Close {
-                        state.mode = Mode::Normal;
+                        new_mode = Some(Mode::Normal);
                     }
                 }
                 KeyCode::Backspace if list.search_active() => { list.search_pop(); }
                 KeyCode::Char(c) if list.search_active() => { list.search_push(c); }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Virtual FK creation form ────────────────────────────────────
-        Mode::VirtualFkAdd(ref form_state) => {
-            let form = form_state.clone();
+        Mode::VirtualFkAdd(ref mut form) => {
+            // Clone form data for read-only use (dropdown items, filter count).
+            // Mutations go through `form` directly since it's &mut.
+            let form_snapshot = form.clone();
 
-            // Build the dropdown items for the currently active field.
-            let dropdown_items: Vec<String> = match &form.active_field {
+            let dropdown_items: Vec<String> = match &form_snapshot.active_field {
                 VirtualFkField::FromTable | VirtualFkField::ToTable => state.display_table_names.clone(),
                 VirtualFkField::IdColumn => {
-                    state.table_columns.get(&form.from_table).cloned().unwrap_or_default()
+                    state.table_columns.get(&form_snapshot.from_table).cloned().unwrap_or_default()
                 }
                 VirtualFkField::TypeColumn => {
                     let mut cols = vec!["(none — simple FK)".to_string()];
-                    cols.extend(state.table_columns.get(&form.from_table).cloned().unwrap_or_default());
+                    cols.extend(state.table_columns.get(&form_snapshot.from_table).cloned().unwrap_or_default());
                     cols
                 }
                 VirtualFkField::TypeValue => {
-                    if form.type_column.is_empty() {
+                    if form_snapshot.type_column.is_empty() {
                         vec!["(no type_column set — skipping)".to_string()]
                     } else {
-                        form.type_options.iter().map(|(v, c)| format!("{}  ({})", v, c)).collect()
+                        form_snapshot.type_options.iter().map(|(v, c)| format!("{}  ({})", v, c)).collect()
                     }
                 }
                 VirtualFkField::ToColumn => {
-                    state.table_columns.get(&form.to_table).cloned().unwrap_or_default()
+                    state.table_columns.get(&form_snapshot.to_table).cloned().unwrap_or_default()
                 }
             };
 
-            // Compute filtered count for navigation
             let flen = {
-                let q = form.list.search_query().to_lowercase();
+                let q = form_snapshot.list.search_query().to_lowercase();
                 dropdown_items.iter()
                     .filter(|s| q.is_empty() || s.to_lowercase().contains(&q))
                     .count()
             };
-            let search_active = form.list.search_active();
+            let search_active = form_snapshot.list.search_active();
 
+            let mut new_mode: Option<Mode> = None;
             match key.code {
-                // ── Tab: advance to next field ─────────────────────────
                 KeyCode::Tab => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        let next = f.active_field.next(f.type_column.is_empty());
-                        f.active_field = next;
-                        f.list.cursor = 0;
-                        f.list.reset_search();
+                    let next = form.active_field.next(form.type_column.is_empty());
+                    form.active_field = next;
+                    form.list.cursor = 0;
+                    form.list.reset_search();
+                    if form.active_field == VirtualFkField::ToColumn {
+                        let to_cols = state.table_columns.get(&form.to_table).cloned().unwrap_or_default();
+                        form.list.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
                     }
-                    // Pre-select "id" when switching to ToColumn
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        if f.active_field == VirtualFkField::ToColumn {
-                            let to_cols = state.table_columns.get(&f.to_table).cloned().unwrap_or_default();
-                            f.list.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
-                        }
-                    }
-                    // Load type options when switching to TypeValue
-                    if let Mode::VirtualFkAdd(f) = &state.mode {
-                        if f.active_field == VirtualFkField::TypeValue && !f.type_column.is_empty() {
-                            let tc = f.type_column.clone();
-                            let ft = f.from_table.clone();
-                            let options = query_type_options(db, &ft, &tc).await;
-                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                f.type_options = options;
-                            }
-                        }
+                    if form.active_field == VirtualFkField::TypeValue && !form.type_column.is_empty() {
+                        let tc = form.type_column.clone();
+                        let ft = form.from_table.clone();
+                        form.type_options = query_type_options(db, &ft, &tc).await;
                     }
                 }
-
-                // ── Shift+Tab: go to previous field ───────────────────
                 KeyCode::BackTab => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        let prev = f.active_field.prev(f.type_column.is_empty());
-                        f.active_field = prev;
-                        f.list.cursor = 0;
-                        f.list.reset_search();
-                    }
-                    // Load type options when switching back to TypeValue
-                    if let Mode::VirtualFkAdd(f) = &state.mode {
-                        if f.active_field == VirtualFkField::TypeValue && !f.type_column.is_empty() {
-                            let tc = f.type_column.clone();
-                            let ft = f.from_table.clone();
-                            let options = query_type_options(db, &ft, &tc).await;
-                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                f.type_options = options;
-                            }
-                        }
+                    let prev = form.active_field.prev(form.type_column.is_empty());
+                    form.active_field = prev;
+                    form.list.cursor = 0;
+                    form.list.reset_search();
+                    if form.active_field == VirtualFkField::TypeValue && !form.type_column.is_empty() {
+                        let tc = form.type_column.clone();
+                        let ft = form.from_table.clone();
+                        form.type_options = query_type_options(db, &ft, &tc).await;
                     }
                 }
-
-                // ── Up/Down: navigate the active dropdown ──────────────
-                KeyCode::Up => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.move_up(); }
-                }
-                KeyCode::Char('k') if !search_active => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.move_up(); }
-                }
-                KeyCode::Down => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.move_down(flen); }
-                }
-                KeyCode::Char('j') if !search_active => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.move_down(flen); }
-                }
-
-                // ── / : activate search ───────────────────────────────
-                KeyCode::Char('/') if !search_active => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.activate_search(); }
-                }
-
-                // ── Esc: 3-level exit ─────────────────────────────────
+                KeyCode::Up => { form.list.move_up(); }
+                KeyCode::Char('k') if !search_active => { form.list.move_up(); }
+                KeyCode::Down => { form.list.move_down(flen); }
+                KeyCode::Char('j') if !search_active => { form.list.move_down(flen); }
+                KeyCode::Char('/') if !search_active => { form.list.activate_search(); }
                 KeyCode::Esc => {
-                    let close = if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                        f.list.handle_esc() == ui::select_list::EscAction::Close
-                    } else {
-                        true
-                    };
-                    if close {
-                        state.mode = Mode::VirtualFkManager { list: SelectList::with_search() };
+                    if form.list.handle_esc() == ui::select_list::EscAction::Close {
+                        new_mode = Some(Mode::VirtualFkManager { list: SelectList::with_search() });
                     }
                 }
-
-                // ── Enter: confirm selection for active field ─────────
                 KeyCode::Enter => {
                     let fi = {
-                        let q = form.list.search_query().to_lowercase();
+                        let q = form_snapshot.list.search_query().to_lowercase();
                         dropdown_items.iter().enumerate()
                             .filter(|(_, s)| q.is_empty() || s.to_lowercase().contains(&q))
                             .map(|(i, _)| i)
                             .collect::<Vec<_>>()
                     };
-                    if let Some(&orig) = fi.get(form.list.cursor) {
+                    if let Some(&orig) = fi.get(form_snapshot.list.cursor) {
                         if let Some(raw_value) = dropdown_items.get(orig) {
                             let raw_value = raw_value.clone();
-
-                            if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                f.list.reset_search();
-                                f.list.cursor = 0;
-                                match &f.active_field {
-                                    VirtualFkField::FromTable => {
-                                        f.from_table = raw_value;
-                                        f.id_column.clear();
-                                        f.type_column.clear();
-                                        f.type_value.clear();
-                                        f.active_field = VirtualFkField::IdColumn;
+                            form.list.reset_search();
+                            form.list.cursor = 0;
+                            match &form.active_field.clone() {
+                                VirtualFkField::FromTable => {
+                                    form.from_table = raw_value;
+                                    form.id_column.clear();
+                                    form.type_column.clear();
+                                    form.type_value.clear();
+                                    form.active_field = VirtualFkField::IdColumn;
+                                }
+                                VirtualFkField::IdColumn => {
+                                    form.id_column = raw_value;
+                                    form.active_field = VirtualFkField::TypeColumn;
+                                }
+                                VirtualFkField::TypeColumn => {
+                                    if raw_value.starts_with("(none") {
+                                        form.type_column.clear();
+                                        form.type_value.clear();
+                                        form.active_field = VirtualFkField::ToTable;
+                                    } else {
+                                        form.type_column = raw_value;
+                                        form.active_field = VirtualFkField::TypeValue;
                                     }
-                                    VirtualFkField::IdColumn => {
-                                        f.id_column = raw_value;
-                                        f.active_field = VirtualFkField::TypeColumn;
+                                }
+                                VirtualFkField::TypeValue => {
+                                    if !raw_value.starts_with("(no type_column") {
+                                        let tv = raw_value
+                                            .split("  (")
+                                            .next()
+                                            .unwrap_or(&raw_value)
+                                            .to_string();
+                                        form.type_value = tv;
                                     }
-                                    VirtualFkField::TypeColumn => {
-                                        if raw_value.starts_with("(none") {
-                                            f.type_column.clear();
-                                            f.type_value.clear();
-                                            f.active_field = VirtualFkField::ToTable;
-                                        } else {
-                                            f.type_column = raw_value;
-                                            f.active_field = VirtualFkField::TypeValue;
-                                        }
-                                    }
-                                    VirtualFkField::TypeValue => {
-                                        if !raw_value.starts_with("(no type_column") {
-                                            let tv = raw_value
-                                                .split("  (")
-                                                .next()
-                                                .unwrap_or(&raw_value)
-                                                .to_string();
-                                            f.type_value = tv;
-                                        }
-                                        f.active_field = VirtualFkField::ToTable;
-                                    }
-                                    VirtualFkField::ToTable => {
-                                        f.to_table = raw_value;
-                                        f.to_column.clear();
-                                        let to_cols = state.table_columns
-                                            .get(&f.to_table).cloned().unwrap_or_default();
-                                        f.list.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
-                                        f.active_field = VirtualFkField::ToColumn;
-                                    }
-                                    VirtualFkField::ToColumn => {
-                                        f.to_column = raw_value;
-                                        if f.is_complete() {
-                                            let vfk = f.to_vfk_def();
-                                            state.virtual_fks.push(vfk.clone());
-                                            engine.schema.virtual_fks.push(vfk);
-                                            let mut mgr_list = SelectList::with_search();
-                                            mgr_list.cursor = state.virtual_fks.len().saturating_sub(1);
-                                            state.mode = Mode::VirtualFkManager { list: mgr_list };
-                                            return Ok(true);
-                                        }
+                                    form.active_field = VirtualFkField::ToTable;
+                                }
+                                VirtualFkField::ToTable => {
+                                    form.to_table = raw_value;
+                                    form.to_column.clear();
+                                    let to_cols = state.table_columns
+                                        .get(&form.to_table).cloned().unwrap_or_default();
+                                    form.list.cursor = to_cols.iter().position(|c| c == "id").unwrap_or(0);
+                                    form.active_field = VirtualFkField::ToColumn;
+                                }
+                                VirtualFkField::ToColumn => {
+                                    form.to_column = raw_value;
+                                    if form.is_complete() {
+                                        let vfk = form.to_vfk_def();
+                                        state.virtual_fks.push(vfk.clone());
+                                        engine.schema.virtual_fks.push(vfk);
+                                        let mut mgr_list = SelectList::with_search();
+                                        mgr_list.cursor = state.virtual_fks.len().saturating_sub(1);
+                                        new_mode = Some(Mode::VirtualFkManager { list: mgr_list });
                                     }
                                 }
                             }
-
                             // Load type options when switching to TypeValue
-                            if let Mode::VirtualFkAdd(f) = &state.mode {
-                                if f.active_field == VirtualFkField::TypeValue
-                                    && !f.type_column.is_empty()
-                                {
-                                    let tc = f.type_column.clone();
-                                    let ft = f.from_table.clone();
-                                    let options = query_type_options(db, &ft, &tc).await;
-                                    if let Mode::VirtualFkAdd(f) = &mut state.mode {
-                                        f.type_options = options;
-                                    }
-                                }
+                            if form.active_field == VirtualFkField::TypeValue
+                                && !form.type_column.is_empty()
+                                && new_mode.is_none()
+                            {
+                                let tc = form.type_column.clone();
+                                let ft = form.from_table.clone();
+                                form.type_options = query_type_options(db, &ft, &tc).await;
                             }
                         }
                     }
                 }
-
-                // ── Ctrl+S: commit + save when form is complete ────────
                 KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                    if form.is_complete() {
+                    if form_snapshot.is_complete() {
                         let vfk = form.to_vfk_def();
                         state.virtual_fks.push(vfk.clone());
                         engine.schema.virtual_fks.push(vfk);
                         match config::save_virtual_fks(&state.virtual_fks) {
                             Ok(path) => {
-                                state.mode = Mode::Info(format!("Virtual FK saved to {}", path.display()));
+                                new_mode = Some(Mode::Info(format!("Virtual FK saved to {}", path.display())));
                             }
                             Err(e) => {
-                                state.mode = Mode::Error(format!("Save failed: {}", e));
+                                new_mode = Some(Mode::Error(format!("Save failed: {}", e)));
                             }
                         }
                     }
                 }
-
-                // ── Search input: printable chars when active ──────────
-                KeyCode::Backspace if search_active => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.search_pop(); }
-                }
-                KeyCode::Char(c) if search_active => {
-                    if let Mode::VirtualFkAdd(f) = &mut state.mode { f.list.search_push(c); }
-                }
-
+                KeyCode::Backspace if search_active => { form.list.search_pop(); }
+                KeyCode::Char(c) if search_active => { form.list.search_push(c); }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Confirm dialog ──────────────────────────────────────────────
-        Mode::Confirm { tag, .. } => {
+        Mode::Confirm { ref tag, .. } => {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('n') | KeyCode::Char('N') => {
                     let save_pw = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
                     match tag {
                         ConfirmAction::SaveConnectionWithPassword { conn_index } => {
-                            if conn_index < conn_mgr.connections.len() {
-                                let conn = &conn_mgr.connections[conn_index];
+                            if *conn_index < conn_mgr.connections.len() {
+                                let conn = &conn_mgr.connections[*conn_index];
                                 let alias = conn.alias.clone();
                                 match config::save_connection(conn, &state.saved_connections, save_pw) {
                                     Ok((path, updated)) => {
@@ -1205,31 +1105,26 @@ async fn handle_key(
         }
 
         // ── Connection manager overlay ─────────────────────────────────
-        Mode::ConnectionManager { mut tab, mut connections_list, mut saved_list, mut connectors_list } => {
-            // These are owned clones (from state.mode.clone()). We mutate them
-            // and write back to state.mode at the end via `writeback`.
-            let mut writeback = true;
-
+        Mode::ConnectionManager { ref mut tab, ref mut connections_list, ref mut saved_list, ref mut connectors_list } => {
             let list = match tab {
-                ConnectionManagerTab::Connections => &mut connections_list,
-                ConnectionManagerTab::Saved => &mut saved_list,
-                ConnectionManagerTab::Connectors => &mut connectors_list,
+                ConnectionManagerTab::Connections => &mut *connections_list,
+                ConnectionManagerTab::Saved => &mut *saved_list,
+                ConnectionManagerTab::Connectors => &mut *connectors_list,
             };
-
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc => {
-                    state.mode = Mode::Normal;
-                    writeback = false;
+                    new_mode = Some(Mode::Normal);
                 }
                 KeyCode::Right | KeyCode::Tab => {
-                    tab = match tab {
+                    *tab = match *tab {
                         ConnectionManagerTab::Connections => ConnectionManagerTab::Saved,
                         ConnectionManagerTab::Saved => ConnectionManagerTab::Connectors,
                         ConnectionManagerTab::Connectors => ConnectionManagerTab::Connections,
                     };
                 }
                 KeyCode::Left | KeyCode::BackTab => {
-                    tab = match tab {
+                    *tab = match *tab {
                         ConnectionManagerTab::Connections => ConnectionManagerTab::Connectors,
                         ConnectionManagerTab::Saved => ConnectionManagerTab::Connections,
                         ConnectionManagerTab::Connectors => ConnectionManagerTab::Saved,
@@ -1239,7 +1134,7 @@ async fn handle_key(
                     list.move_up();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let len = match tab {
+                    let len = match *tab {
                         ConnectionManagerTab::Connections => state.connections_summary.len(),
                         ConnectionManagerTab::Saved => state.saved_connections.len(),
                         ConnectionManagerTab::Connectors => ConnectionType::all().len(),
@@ -1248,13 +1143,12 @@ async fn handle_key(
                 }
                 KeyCode::Enter => {
                     let cursor = list.cursor;
-                    match tab {
+                    match *tab {
                         ConnectionManagerTab::Connectors => {
                             let types = ConnectionType::all();
                             if cursor < types.len() {
                                 let ct = types[cursor].clone();
-                                state.mode = Mode::ConnectionAdd(ConnectionForm::new(ct));
-                                writeback = false;
+                                new_mode = Some(Mode::ConnectionAdd(ConnectionForm::new(ct)));
                             }
                         }
                         ConnectionManagerTab::Saved => {
@@ -1276,11 +1170,10 @@ async fn handle_key(
                                     })
                                     .unwrap_or_else(|| format!("conn{}", cursor + 1));
                                 let _ = conn_type;
-                                state.mode = Mode::SavedConnectionAlias {
+                                new_mode = Some(Mode::SavedConnectionAlias {
                                     saved_index: cursor,
                                     alias: suggested,
-                                };
-                                writeback = false;
+                                });
                             }
                         }
                         ConnectionManagerTab::Connections => {
@@ -1297,45 +1190,60 @@ async fn handle_key(
                 }
                 KeyCode::Char('d') | KeyCode::Char('x') => {
                     let cursor = list.cursor;
-                    if tab == ConnectionManagerTab::Saved && cursor < state.saved_connections.len() {
+                    if *tab == ConnectionManagerTab::Saved && cursor < state.saved_connections.len() {
                         let removed_id = state.saved_connections[cursor].id.clone();
                         if let Ok((_path, updated)) = config::remove_saved_connection(&removed_id, &state.saved_connections) {
                             state.saved_connections = updated;
                         } else {
                             state.saved_connections.remove(cursor);
                         }
-                        state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
                         list.clamp_cursor(state.saved_connections.len());
-                    } else if tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
+                        // Inline saved_ids to avoid borrowing all of `state`.
+                        let sids: std::collections::HashSet<String> =
+                            state.saved_connections.iter().map(|s| s.id.clone()).collect();
+                        state.connections_summary = conn_mgr.connection_summaries(&sids);
+                    } else if *tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
                         conn_mgr.remove_connection(cursor);
-                        refresh_schema_from_conn_mgr(state, engine, conn_mgr);
                         list.clamp_cursor(conn_mgr.connections.len());
+                        // Inline refresh to avoid borrowing all of `state`.
+                        let mut schema = conn_mgr.merged_schema().clone();
+                        for vfk in &state.virtual_fks {
+                            schema.virtual_fks.push(vfk.clone());
+                        }
+                        engine.schema = schema;
+                        state.table_names = engine.schema.table_names();
+                        state.table_columns = engine.schema.tables.iter().map(|(name, info)| {
+                            let cols = info.columns.iter().map(|c| c.name.clone()).collect();
+                            (name.clone(), cols)
+                        }).collect();
+                        let sids: std::collections::HashSet<String> =
+                            state.saved_connections.iter().map(|s| s.id.clone()).collect();
+                        state.connections_summary = conn_mgr.connection_summaries(&sids);
+                        state.display_table_names = conn_mgr.display_table_names();
+                        state.display_name_map = conn_mgr.display_name_map();
                     }
                 }
                 KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                     let cursor = list.cursor;
-                    if tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
+                    if *tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
                         let conn = &conn_mgr.connections[cursor];
                         if conn.has_password() {
-                            state.mode = Mode::Confirm {
+                            new_mode = Some(Mode::Confirm {
                                 message: format!(
                                     "Connection '{}' has a password. Save password to config file? (y/n)",
                                     conn.alias
                                 ),
                                 tag: ConfirmAction::SaveConnectionWithPassword { conn_index: cursor },
-                            };
-                            writeback = false;
+                            });
                         } else {
                             match config::save_connection(conn, &state.saved_connections, false) {
                                 Ok((path, updated)) => {
                                     state.saved_connections = updated;
                                     state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
-                                    state.mode = Mode::Info(format!("Connection '{}' saved to {}", conn.alias, path.display()));
-                                    writeback = false;
+                                    new_mode = Some(Mode::Info(format!("Connection '{}' saved to {}", conn.alias, path.display())));
                                 }
                                 Err(e) => {
-                                    state.mode = Mode::Error(format!("Save failed: {}", e));
-                                    writeback = false;
+                                    new_mode = Some(Mode::Error(format!("Save failed: {}", e)));
                                 }
                             }
                         }
@@ -1343,25 +1251,20 @@ async fn handle_key(
                 }
                 _ => {}
             }
-
-            if writeback {
-                state.mode = Mode::ConnectionManager {
-                    tab, connections_list, saved_list, connectors_list,
-                };
-            }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Saved connection alias prompt ────────────────────────────────
-        Mode::SavedConnectionAlias { saved_index, ref alias } => {
-            let saved_index = saved_index;
-            let alias = alias.clone();
+        Mode::SavedConnectionAlias { saved_index, ref mut alias } => {
+            let saved_index = *saved_index;
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc => {
                     let mut mode = Mode::connection_manager(ConnectionManagerTab::Saved);
                     if let Mode::ConnectionManager { ref mut saved_list, .. } = mode {
                         saved_list.cursor = saved_index;
                     }
-                    state.mode = mode;
+                    new_mode = Some(mode);
                 }
                 KeyCode::Enter => {
                     if !alias.is_empty() {
@@ -1371,19 +1274,20 @@ async fn handle_key(
                                 "sqlite" => ConnectionType::Sqlite,
                                 _ => ConnectionType::Mysql,
                             };
+                            let alias_str = alias.clone();
                             let params = saved.params.clone();
                             match conn_type.build_url(&params) {
                                 Ok(url) => {
                                     let result = conn_mgr.add_connection(
-                                        Some(inherited_id), alias.clone(), conn_type, url, params,
+                                        Some(inherited_id), alias_str.clone(), conn_type, url, params,
                                     ).await;
                                     refresh_schema_from_conn_mgr(state, engine, conn_mgr);
                                     match result {
                                         Ok(()) => {
-                                            state.mode = Mode::Info(format!(
+                                            new_mode = Some(Mode::Info(format!(
                                                 "Connected '{}'",
-                                                alias,
-                                            ));
+                                                alias_str,
+                                            )));
                                         }
                                         Err(_) => {
                                             let conn_idx = conn_mgr.connections.len().saturating_sub(1);
@@ -1391,50 +1295,39 @@ async fn handle_key(
                                             if let Mode::ConnectionManager { ref mut connections_list, .. } = mode {
                                                 connections_list.cursor = conn_idx;
                                             }
-                                            state.mode = mode;
+                                            new_mode = Some(mode);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    state.mode = Mode::Error(format!("Invalid params: {}", e));
+                                    new_mode = Some(Mode::Error(format!("Invalid params: {}", e)));
                                 }
                             }
                         }
                     }
                 }
-                KeyCode::Backspace => {
-                    if let Mode::SavedConnectionAlias { ref mut alias, .. } = state.mode {
-                        alias.pop();
-                    }
-                }
-                KeyCode::Char(c) => {
-                    if let Mode::SavedConnectionAlias { ref mut alias, .. } = state.mode {
-                        alias.push(c);
-                    }
-                }
+                KeyCode::Backspace => { alias.pop(); }
+                KeyCode::Char(c) => { alias.push(c); }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Connection add form ─────────────────────────────────────────
-        Mode::ConnectionAdd(ref form_state) => {
-            let form = form_state.clone();
+        Mode::ConnectionAdd(ref mut form) => {
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc => {
-                    state.mode = Mode::connection_manager(ConnectionManagerTab::Connectors);
+                    new_mode = Some(Mode::connection_manager(ConnectionManagerTab::Connectors));
                 }
                 KeyCode::Tab => {
-                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
-                        f.active_field = (f.active_field + 1) % f.fields.len();
-                    }
+                    form.active_field = (form.active_field + 1) % form.fields.len();
                 }
                 KeyCode::BackTab => {
-                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
-                        if f.active_field == 0 {
-                            f.active_field = f.fields.len() - 1;
-                        } else {
-                            f.active_field -= 1;
-                        }
+                    if form.active_field == 0 {
+                        form.active_field = form.fields.len() - 1;
+                    } else {
+                        form.active_field -= 1;
                     }
                 }
                 KeyCode::Enter | KeyCode::Char('s')
@@ -1447,17 +1340,15 @@ async fn handle_key(
                         let params = form.values();
                         match conn_type.build_url(&params) {
                             Err(e) => {
-                                state.mode = Mode::Error(format!("Invalid params: {}", e));
+                                new_mode = Some(Mode::Error(format!("Invalid params: {}", e)));
                             }
                             Ok(url) => {
-                                // add_connection adds the connection regardless of
-                                // success/failure (Error state on failure).
                                 let result = conn_mgr.add_connection(None, alias.clone(), conn_type, url, params).await;
                                 refresh_schema_from_conn_mgr(state, engine, conn_mgr);
                                 let conn_idx = conn_mgr.connections.len().saturating_sub(1);
                                 match result {
                                     Ok(()) => {
-                                        state.mode = Mode::Info(format!(
+                                        new_mode = Some(Mode::Info(format!(
                                             "Connected '{}' ({} tables)",
                                             alias,
                                             conn_mgr
@@ -1465,16 +1356,14 @@ async fn handle_key(
                                                 .last()
                                                 .map(|c| c.original_tables.len())
                                                 .unwrap_or(0)
-                                        ));
+                                        )));
                                     }
                                     Err(_) => {
-                                        // Connection was added in Error state;
-                                        // go to manager so user can see it and retry.
                                         let mut mode = Mode::connection_manager(ConnectionManagerTab::Connections);
                                         if let Mode::ConnectionManager { ref mut connections_list, .. } = mode {
                                             connections_list.cursor = conn_idx;
                                         }
-                                        state.mode = mode;
+                                        new_mode = Some(mode);
                                     }
                                 }
                             }
@@ -1482,24 +1371,22 @@ async fn handle_key(
                     }
                 }
                 KeyCode::Backspace => {
-                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
-                        f.fields[f.active_field].value.pop();
-                    }
+                    form.fields[form.active_field].value.pop();
                 }
                 KeyCode::Char(c) => {
-                    if let Mode::ConnectionAdd(ref mut f) = state.mode {
-                        f.fields[f.active_field].value.push(c);
-                    }
+                    form.fields[form.active_field].value.push(c);
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Manual list ──────────────────────────────────────────────────
         Mode::ManualList { ref mut list } => {
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => {
-                    state.mode = Mode::Normal;
+                    new_mode = Some(Mode::Normal);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     list.move_up();
@@ -1508,33 +1395,33 @@ async fn handle_key(
                     list.move_down(ui::render::MANUALS.len());
                 }
                 KeyCode::Enter => {
-                    state.mode = Mode::ManualView { index: list.cursor, scroll: 0 };
+                    new_mode = Some(Mode::ManualView { index: list.cursor, scroll: 0 });
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
 
         // ── Manual viewer ────────────────────────────────────────────────
-        Mode::ManualView { index, scroll } => {
-            let line_count = ui::render::manual_line_count(index);
+        Mode::ManualView { ref mut index, ref mut scroll } => {
+            let idx = *index;
+            let line_count = ui::render::manual_line_count(idx);
+            let mut new_mode: Option<Mode> = None;
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     let mut list = SelectList::new();
-                    list.cursor = index;
-                    state.mode = Mode::ManualList { list };
+                    list.cursor = idx;
+                    new_mode = Some(Mode::ManualList { list });
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if scroll > 0 {
-                        state.mode = Mode::ManualView { index, scroll: scroll - 1 };
-                    }
+                    if *scroll > 0 { *scroll -= 1; }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if scroll + 1 < line_count {
-                        state.mode = Mode::ManualView { index, scroll: scroll + 1 };
-                    }
+                    if *scroll + 1 < line_count { *scroll += 1; }
                 }
                 _ => {}
             }
+            if let Some(m) = new_mode { state.mode = m; }
         }
     }
 
