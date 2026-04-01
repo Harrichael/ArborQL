@@ -15,7 +15,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use engine::{Engine, flatten_tree};
+use engine::Engine;
+use ui::tree_view::{flatten_tree, toggle_fold};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rules::Completion;
 
@@ -1481,26 +1482,4 @@ async fn execute_command(
     Ok(())
 }
 
-/// Toggle the collapsed state of the node at `flat_idx` in the tree.
-fn toggle_fold(roots: &mut [engine::DataNode], flat_idx: usize) {
-    let mut counter = 0usize;
-    toggle_fold_recursive(roots, flat_idx, &mut counter);
-}
 
-fn toggle_fold_recursive(
-    nodes: &mut [engine::DataNode],
-    target: usize,
-    counter: &mut usize,
-) -> bool {
-    for node in nodes.iter_mut() {
-        if *counter == target {
-            node.collapsed = !node.collapsed;
-            return true;
-        }
-        *counter += 1;
-        if !node.collapsed && toggle_fold_recursive(&mut node.children, target, counter) {
-            return true;
-        }
-    }
-    false
-}

@@ -1,5 +1,6 @@
 use crate::connection_manager::{ConnectionStatus, ConnectionType};
-use crate::engine::{flatten_tree, DataNode};
+use crate::engine::DataNode;
+use crate::ui::tree_view::flatten_tree;
 use crate::rules::{completions_at, Completion};
 use crate::ui::app::{AppState, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
 use crate::ui::select_list::SelectList;
