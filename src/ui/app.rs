@@ -174,7 +174,9 @@ pub enum Mode {
     /// User is browsing the connection manager.
     ConnectionManager {
         tab: ConnectionManagerTab,
-        list: SelectList,
+        connections_list: SelectList,
+        saved_list: SelectList,
+        connectors_list: SelectList,
     },
     /// User is filling the connection creation form.
     ConnectionAdd(ConnectionForm),
@@ -192,6 +194,18 @@ pub enum Mode {
 pub enum ConfirmAction {
     /// Save a single connection — user decides whether to include the password.
     SaveConnectionWithPassword { conn_index: usize },
+}
+
+impl Mode {
+    /// Create a ConnectionManager mode with the given tab and fresh cursors.
+    pub fn connection_manager(tab: ConnectionManagerTab) -> Self {
+        Mode::ConnectionManager {
+            tab,
+            connections_list: SelectList::new(),
+            saved_list: SelectList::new(),
+            connectors_list: SelectList::new(),
+        }
+    }
 }
 
 /// Which tab is active in the connection manager.

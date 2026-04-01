@@ -537,10 +537,7 @@ async fn handle_key(
                 }
                 KeyCode::Char('+') => {
                     state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
-                    state.mode = Mode::ConnectionManager {
-                        tab: ConnectionManagerTab::Connections,
-                        list: SelectList::new(),
-                    };
+                    state.mode = Mode::connection_manager(ConnectionManagerTab::Connections);
                 }
                 _ => {}
             }
@@ -1208,57 +1205,60 @@ async fn handle_key(
         }
 
         // ── Connection manager overlay ─────────────────────────────────
-        Mode::ConnectionManager { tab, ref mut list } => {
+        Mode::ConnectionManager { mut tab, mut connections_list, mut saved_list, mut connectors_list } => {
+            // These are owned clones (from state.mode.clone()). We mutate them
+            // and write back to state.mode at the end via `writeback`.
+            let mut writeback = true;
+
+            let list = match tab {
+                ConnectionManagerTab::Connections => &mut connections_list,
+                ConnectionManagerTab::Saved => &mut saved_list,
+                ConnectionManagerTab::Connectors => &mut connectors_list,
+            };
+
             match key.code {
                 KeyCode::Esc => {
                     state.mode = Mode::Normal;
+                    writeback = false;
                 }
                 KeyCode::Right | KeyCode::Tab => {
-                    let new_tab = match tab {
+                    tab = match tab {
                         ConnectionManagerTab::Connections => ConnectionManagerTab::Saved,
                         ConnectionManagerTab::Saved => ConnectionManagerTab::Connectors,
                         ConnectionManagerTab::Connectors => ConnectionManagerTab::Connections,
                     };
-                    state.mode = Mode::ConnectionManager { tab: new_tab, list: SelectList::new() };
                 }
                 KeyCode::Left | KeyCode::BackTab => {
-                    let new_tab = match tab {
+                    tab = match tab {
                         ConnectionManagerTab::Connections => ConnectionManagerTab::Connectors,
                         ConnectionManagerTab::Saved => ConnectionManagerTab::Connections,
                         ConnectionManagerTab::Connectors => ConnectionManagerTab::Saved,
                     };
-                    state.mode = Mode::ConnectionManager { tab: new_tab, list: SelectList::new() };
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     list.move_up();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let len = match &tab {
-                        ConnectionManagerTab::Connections => {
-                            state.connections_summary.len()
-                        }
-                        ConnectionManagerTab::Saved => {
-                            state.saved_connections.len()
-                        }
-                        ConnectionManagerTab::Connectors => {
-                            ConnectionType::all().len()
-                        }
+                    let len = match tab {
+                        ConnectionManagerTab::Connections => state.connections_summary.len(),
+                        ConnectionManagerTab::Saved => state.saved_connections.len(),
+                        ConnectionManagerTab::Connectors => ConnectionType::all().len(),
                     };
                     list.move_down(len);
                 }
                 KeyCode::Enter => {
                     let cursor = list.cursor;
-                    match &tab {
+                    match tab {
                         ConnectionManagerTab::Connectors => {
                             let types = ConnectionType::all();
                             if cursor < types.len() {
                                 let ct = types[cursor].clone();
                                 state.mode = Mode::ConnectionAdd(ConnectionForm::new(ct));
+                                writeback = false;
                             }
                         }
                         ConnectionManagerTab::Saved => {
                             if cursor < state.saved_connections.len() {
-                                // Suggest an alias from the saved params.
                                 let saved = &state.saved_connections[cursor];
                                 let conn_type = match saved.conn_type.as_str() {
                                     "sqlite" => ConnectionType::Sqlite,
@@ -1275,25 +1275,22 @@ async fn handle_key(
                                             .to_string()
                                     })
                                     .unwrap_or_else(|| format!("conn{}", cursor + 1));
-                                let _ = conn_type; // used only for alias suggestion
+                                let _ = conn_type;
                                 state.mode = Mode::SavedConnectionAlias {
                                     saved_index: cursor,
                                     alias: suggested,
                                 };
+                                writeback = false;
                             }
                         }
                         ConnectionManagerTab::Connections => {
-                            // Toggle connect/disconnect (also retries on Error)
                             if cursor < conn_mgr.connections.len() {
                                 if conn_mgr.connections[cursor].is_connected() {
                                     conn_mgr.disconnect(cursor);
                                 } else {
-                                    // Attempt reconnect; on failure the connection
-                                    // stays in Error state which is visible in the list.
                                     let _ = conn_mgr.reconnect(cursor).await;
                                 }
                                 refresh_schema_from_conn_mgr(state, engine, conn_mgr);
-                                state.mode = Mode::ConnectionManager { tab, list: SelectList::new() };
                             }
                         }
                     }
@@ -1302,21 +1299,17 @@ async fn handle_key(
                     let cursor = list.cursor;
                     if tab == ConnectionManagerTab::Saved && cursor < state.saved_connections.len() {
                         let removed_id = state.saved_connections[cursor].id.clone();
-                        // Persist removal to config.
                         if let Ok((_path, updated)) = config::remove_saved_connection(&removed_id, &state.saved_connections) {
                             state.saved_connections = updated;
                         } else {
                             state.saved_connections.remove(cursor);
                         }
-                        // Refresh summaries so is_saved updates for any live connection with this ID.
                         state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
                         list.clamp_cursor(state.saved_connections.len());
                     } else if tab == ConnectionManagerTab::Connections && cursor < conn_mgr.connections.len() {
                         conn_mgr.remove_connection(cursor);
                         refresh_schema_from_conn_mgr(state, engine, conn_mgr);
-                        let mut new_list = SelectList::new();
-                        new_list.cursor = cursor.min(conn_mgr.connections.len().saturating_sub(1));
-                        state.mode = Mode::ConnectionManager { tab, list: new_list };
+                        list.clamp_cursor(conn_mgr.connections.len());
                     }
                 }
                 KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
@@ -1331,21 +1324,30 @@ async fn handle_key(
                                 ),
                                 tag: ConfirmAction::SaveConnectionWithPassword { conn_index: cursor },
                             };
+                            writeback = false;
                         } else {
                             match config::save_connection(conn, &state.saved_connections, false) {
                                 Ok((path, updated)) => {
                                     state.saved_connections = updated;
                                     state.connections_summary = conn_mgr.connection_summaries(&saved_ids(state));
                                     state.mode = Mode::Info(format!("Connection '{}' saved to {}", conn.alias, path.display()));
+                                    writeback = false;
                                 }
                                 Err(e) => {
                                     state.mode = Mode::Error(format!("Save failed: {}", e));
+                                    writeback = false;
                                 }
                             }
                         }
                     }
                 }
                 _ => {}
+            }
+
+            if writeback {
+                state.mode = Mode::ConnectionManager {
+                    tab, connections_list, saved_list, connectors_list,
+                };
             }
         }
 
@@ -1355,12 +1357,11 @@ async fn handle_key(
             let alias = alias.clone();
             match key.code {
                 KeyCode::Esc => {
-                    let mut list = SelectList::new();
-                    list.cursor = saved_index;
-                    state.mode = Mode::ConnectionManager {
-                        tab: ConnectionManagerTab::Saved,
-                        list,
-                    };
+                    let mut mode = Mode::connection_manager(ConnectionManagerTab::Saved);
+                    if let Mode::ConnectionManager { ref mut saved_list, .. } = mode {
+                        saved_list.cursor = saved_index;
+                    }
+                    state.mode = mode;
                 }
                 KeyCode::Enter => {
                     if !alias.is_empty() {
@@ -1386,12 +1387,11 @@ async fn handle_key(
                                         }
                                         Err(_) => {
                                             let conn_idx = conn_mgr.connections.len().saturating_sub(1);
-                                            let mut list = SelectList::new();
-                                            list.cursor = conn_idx;
-                                            state.mode = Mode::ConnectionManager {
-                                                tab: ConnectionManagerTab::Connections,
-                                                list,
-                                            };
+                                            let mut mode = Mode::connection_manager(ConnectionManagerTab::Connections);
+                                            if let Mode::ConnectionManager { ref mut connections_list, .. } = mode {
+                                                connections_list.cursor = conn_idx;
+                                            }
+                                            state.mode = mode;
                                         }
                                     }
                                 }
@@ -1421,10 +1421,7 @@ async fn handle_key(
             let form = form_state.clone();
             match key.code {
                 KeyCode::Esc => {
-                    state.mode = Mode::ConnectionManager {
-                        tab: ConnectionManagerTab::Connectors,
-                        list: SelectList::new(),
-                    };
+                    state.mode = Mode::connection_manager(ConnectionManagerTab::Connectors);
                 }
                 KeyCode::Tab => {
                     if let Mode::ConnectionAdd(ref mut f) = state.mode {
@@ -1473,12 +1470,11 @@ async fn handle_key(
                                     Err(_) => {
                                         // Connection was added in Error state;
                                         // go to manager so user can see it and retry.
-                                        let mut list = SelectList::new();
-                                        list.cursor = conn_idx;
-                                        state.mode = Mode::ConnectionManager {
-                                            tab: ConnectionManagerTab::Connections,
-                                            list,
-                                        };
+                                        let mut mode = Mode::connection_manager(ConnectionManagerTab::Connections);
+                                        if let Mode::ConnectionManager { ref mut connections_list, .. } = mode {
+                                            connections_list.cursor = conn_idx;
+                                        }
+                                        state.mode = mode;
                                     }
                                 }
                             }

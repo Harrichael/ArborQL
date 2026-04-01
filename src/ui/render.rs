@@ -868,7 +868,14 @@ fn render_pick_list(
 
 fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
     let (tab, cursor) = match &state.mode {
-        Mode::ConnectionManager { tab, list } => (tab.clone(), list.cursor),
+        Mode::ConnectionManager { tab, connections_list, saved_list, connectors_list } => {
+            let list = match tab {
+                ConnectionManagerTab::Connections => connections_list,
+                ConnectionManagerTab::Saved => saved_list,
+                ConnectionManagerTab::Connectors => connectors_list,
+            };
+            (tab.clone(), list.cursor)
+        }
         _ => return,
     };
 
