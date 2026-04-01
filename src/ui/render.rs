@@ -1,7 +1,9 @@
 use crate::connection_manager::{ConnectionStatus, ConnectionType};
-use crate::engine::{flatten_tree, DataNode};
+use crate::engine::DataNode;
+use crate::ui::tree_view::flatten_tree;
 use crate::rules::{completions_at, Completion};
 use crate::ui::app::{AppState, ConnectionManagerTab, Mode, VirtualFkField, VirtualFkForm};
+use crate::ui::select_list::SelectList;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -63,8 +65,8 @@ pub fn render(f: &mut Frame, state: &mut AppState, roots: &[DataNode]) {
 
     // Render overlays
     match &state.mode {
-        Mode::PathSelection => render_path_selection(f, state),
-        Mode::RuleReorder => render_rule_reorder(f, state),
+        Mode::PathSelection { .. } => render_path_selection(f, state),
+        Mode::RuleReorder { .. } => render_rule_reorder(f, state),
         Mode::VirtualFkManager { .. } => render_virtual_fk_manager(f, state),
         Mode::VirtualFkAdd(_) => render_virtual_fk_add(f, state),
         Mode::LogViewer { .. } => render_log_viewer(f, state),
@@ -353,25 +355,27 @@ fn format_completions(completions: &[Completion]) -> String {
     text
 }
 
-fn render_path_selection(f: &mut Frame, state: &AppState) {
+fn render_path_selection(f: &mut Frame, state: &mut AppState) {
     let area = centered_rect(70, 60, f.area());
     f.render_widget(Clear, area);
 
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let offset = if state.path_cursor >= inner_height {
-        state.path_cursor + 1 - inner_height
-    } else {
-        0
+    let list = match &mut state.mode {
+        Mode::PathSelection { list } => list,
+        _ => return,
     };
 
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let (skip, take) = list.visible_window(inner_height);
+
+    let cursor = list.cursor;
     let items: Vec<ListItem> = state
         .paths
         .iter()
         .enumerate()
-        .skip(offset)
-        .take(inner_height)
+        .skip(skip)
+        .take(take)
         .map(|(i, p)| {
-            let selected = i == state.path_cursor;
+            let selected = i == cursor;
             let summary_style = if selected {
                 Style::default().bg(Color::Blue).fg(Color::White)
             } else {
@@ -429,6 +433,11 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
     let area = centered_rect(60, 50, f.area());
     f.render_widget(Clear, area);
 
+    let rule_cursor = match &state.mode {
+        Mode::RuleReorder { list } => list.cursor,
+        _ => 0,
+    };
+
     let mut items: Vec<ListItem> = Vec::new();
     const SLOT_LABEL: &str = "next insertion";
 
@@ -445,7 +454,7 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
 
             let text = format!("   {}. {}", i + 1, r);
             let item = ListItem::new(text);
-            if i == state.rule_cursor {
+            if i == rule_cursor {
                 items.push(item.style(Style::default().bg(Color::Blue).fg(Color::White)));
             } else {
                 items.push(item);
@@ -469,72 +478,71 @@ fn render_rule_reorder(f: &mut Frame, state: &AppState) {
 }
 
 fn render_column_add(f: &mut Frame, state: &mut AppState) {
-    if let Some((ref table, ref items, cursor)) = state.column_add.clone() {
-        let area = centered_rect(50, 70, f.area());
-        f.render_widget(Clear, area);
+    let (table, items, list) = match &mut state.column_add {
+        Some((t, i, l)) => (t.clone(), i.clone(), l),
+        None => return,
+    };
 
-        // Reserve last row for search bar
-        let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
-        let list_area = if has_search {
-            Rect { height: area.height.saturating_sub(3), ..area }
-        } else {
-            area
-        };
+    let area = centered_rect(50, 70, f.area());
+    f.render_widget(Clear, area);
 
-        let inner_height = list_area.height.saturating_sub(2) as usize;
+    let has_search = list.has_search_visible();
+    let list_area = if has_search {
+        Rect { height: area.height.saturating_sub(3), ..area }
+    } else {
+        area
+    };
 
-        // Apply search filter — cursor is index into filtered list
-        let q = state.overlay_search.to_lowercase();
-        let filtered: Vec<(usize, &crate::ui::app::ColumnManagerItem)> = items.iter()
-            .enumerate()
-            .filter(|(_, it)| q.is_empty() || it.name.to_lowercase().contains(&q))
-            .collect();
+    let inner_height = list_area.height.saturating_sub(2) as usize;
 
-        // Clamp scroll: scroll only when cursor leaves visible window
-        if cursor < state.overlay_scroll {
-            state.overlay_scroll = cursor;
-        } else if cursor >= state.overlay_scroll + inner_height {
-            state.overlay_scroll = cursor + 1 - inner_height;
-        }
-        let offset = state.overlay_scroll;
+    let q = list.search_query().to_lowercase();
+    let filtered: Vec<(usize, &crate::ui::app::ColumnManagerItem)> = items.iter()
+        .enumerate()
+        .filter(|(_, it)| q.is_empty() || it.name.to_lowercase().contains(&q))
+        .collect();
 
-        let list_items: Vec<ListItem> = filtered
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(inner_height)
-            .map(|(fi, (_, col))| {
-                let marker = if col.enabled { "[x]" } else { "[ ]" };
-                let item = ListItem::new(format!("{} {}", marker, col.name));
-                if fi == cursor {
-                    item.style(Style::default().bg(Color::Green).fg(Color::Black))
-                } else {
-                    item
-                }
-            })
-            .collect();
+    let (skip, take) = list.visible_window(inner_height);
+    let cursor = list.cursor;
 
-        let match_info = if !state.overlay_search.is_empty() {
-            format!("  ({} matches)", filtered.len())
-        } else {
-            String::new()
-        };
-        let reorder_hint = if state.overlay_search.is_empty() { "  u/d reorder" } else { "" };
-        let list = List::new(list_items).block(
-            Block::default()
-                .title(format!(
-                    " Columns for '{}'{} (↑↓ nav · space/x toggle{}· /search · Enter apply · Esc) ",
-                    table, match_info, reorder_hint
-                ))
-                .borders(Borders::ALL),
-        );
-        f.render_widget(list, list_area);
+    let list_items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .take(take)
+        .map(|(fi, (_, col))| {
+            let marker = if col.enabled { "[x]" } else { "[ ]" };
+            let item = ListItem::new(format!("{} {}", marker, col.name));
+            if fi == cursor {
+                item.style(Style::default().bg(Color::Green).fg(Color::Black))
+            } else {
+                item
+            }
+        })
+        .collect();
 
-        // Search bar
-        if has_search {
-            let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
-            render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
-        }
+    let match_info = if !q.is_empty() {
+        format!("  ({} matches)", filtered.len())
+    } else {
+        String::new()
+    };
+    let reorder_hint = if q.is_empty() { "  u/d reorder" } else { "" };
+
+    let search_query = list.search_query().to_string();
+    let search_active = list.search_active();
+
+    let widget = List::new(list_items).block(
+        Block::default()
+            .title(format!(
+                " Columns for '{}'{} (↑↓ nav · space/x toggle{}· /search · Enter apply · Esc) ",
+                table, match_info, reorder_hint
+            ))
+            .borders(Borders::ALL),
+    );
+    f.render_widget(widget, list_area);
+
+    if has_search {
+        let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
+        render_search_bar(f, search_area, &search_query, search_active);
     }
 }
 
@@ -556,10 +564,12 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
     let area = centered_rect(72, 70, f.area());
     f.render_widget(Clear, area);
 
-    let cursor = if let Mode::VirtualFkManager { cursor } = state.mode { cursor } else { 0 };
+    let list = match &mut state.mode {
+        Mode::VirtualFkManager { list } => list,
+        _ => return,
+    };
 
-    // Reserve last row for search bar
-    let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
+    let has_search = list.has_search_visible();
     let list_area = if has_search {
         Rect { height: area.height.saturating_sub(3), ..area }
     } else {
@@ -569,7 +579,7 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
     let inner_height = list_area.height.saturating_sub(2) as usize;
 
     // Apply search filter
-    let q = state.overlay_search.to_lowercase();
+    let q = list.search_query().to_lowercase();
     let filtered: Vec<(usize, &crate::schema::VirtualFkDef)> = state.virtual_fks.iter()
         .enumerate()
         .filter(|(_, vfk)| {
@@ -580,13 +590,8 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
         })
         .collect();
 
-    // Clamp scroll: only move when cursor leaves visible window
-    if cursor < state.overlay_scroll {
-        state.overlay_scroll = cursor;
-    } else if inner_height > 0 && cursor >= state.overlay_scroll + inner_height {
-        state.overlay_scroll = cursor + 1 - inner_height;
-    }
-    let offset = state.overlay_scroll;
+    let (offset, _) = list.visible_window(inner_height);
+    let cursor = list.cursor;
 
     let items: Vec<ListItem> = if state.virtual_fks.is_empty() {
         vec![ListItem::new("  (none — press 'a' to add one)")
@@ -627,23 +632,27 @@ fn render_virtual_fk_manager(f: &mut Frame, state: &mut AppState) {
             .collect()
     };
 
-    let match_info = if !state.overlay_search.is_empty() {
+    let (search_query, search_active) = match &state.mode {
+        Mode::VirtualFkManager { list } => (list.search_query().to_string(), list.search_active()),
+        _ => (String::new(), false),
+    };
+
+    let match_info = if !search_query.is_empty() {
         format!("  ({} matches)", filtered.len())
     } else {
         String::new()
     };
-    let list = List::new(items).block(
+    let widget = List::new(items).block(
         Block::default()
             .title(format!(" Virtual FK Manager{}  (↑↓ navigate · a add · d/x delete · /search · Ctrl+S save · Esc) ", match_info))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan)),
     );
-    f.render_widget(list, list_area);
+    f.render_widget(widget, list_area);
 
-    // Search bar
     if has_search {
         let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
-        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+        render_search_bar(f, search_area, &search_query, search_active);
     }
 }
 
@@ -693,7 +702,8 @@ fn render_virtual_fk_add(f: &mut Frame, state: &mut AppState) {
     render_vfk_form_header(f, &form, header_area);
 
     // ── Dropdown: pick-list for the active field (handles search bar too) ──
-    render_vfk_form_dropdown(f, state, &form, dropdown_area);
+    let cursor = form.list.cursor;
+    render_vfk_form_dropdown(f, state, &form, cursor, dropdown_area);
 }
 
 /// Render the 6-field summary header showing current values for every field.
@@ -761,7 +771,7 @@ fn render_vfk_form_header(f: &mut Frame, form: &VirtualFkForm, area: Rect) {
 }
 
 /// Render the dropdown list for the currently active field.
-fn render_vfk_form_dropdown(f: &mut Frame, state: &mut AppState, form: &VirtualFkForm, area: Rect) {
+fn render_vfk_form_dropdown(f: &mut Frame, state: &mut AppState, form: &VirtualFkForm, _cursor: usize, area: Rect) {
     // Build the items for the active field
     let items: Vec<String> = match &form.active_field {
         VirtualFkField::FromTable | VirtualFkField::ToTable => state.display_table_names.clone(),
@@ -794,21 +804,25 @@ fn render_vfk_form_dropdown(f: &mut Frame, state: &mut AppState, form: &VirtualF
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
-    render_pick_list(f, state, &items, form.cursor, area, block);
+    // Get the form's SelectList from the mode
+    let list = match &mut state.mode {
+        Mode::VirtualFkAdd(f) => &mut f.list,
+        _ => return,
+    };
+
+    render_pick_list(f, list, &items, area, block);
 }
 
 /// Render a scrollable pick list with search support.
-/// `cursor` is the index into the *filtered* list.
-/// Updates `state.overlay_scroll` to keep cursor in view.
+/// Uses the given `SelectList` for cursor, scroll, and search state.
 fn render_pick_list(
     f: &mut ratatui::Frame,
-    state: &mut AppState,
+    list: &mut SelectList,
     items: &[String],
-    cursor: usize,
     area: Rect,
     block: Block,
 ) {
-    let has_search = state.overlay_search_active || !state.overlay_search.is_empty();
+    let has_search = list.has_search_visible();
     let list_area = if has_search {
         Rect { height: area.height.saturating_sub(3), ..area }
     } else {
@@ -816,22 +830,18 @@ fn render_pick_list(
     };
     let inner_height = list_area.height.saturating_sub(2) as usize;
 
-    let q = state.overlay_search.to_lowercase();
+    let q = list.search_query().to_lowercase();
     let filtered: Vec<(usize, &String)> = items.iter().enumerate()
         .filter(|(_, s)| q.is_empty() || s.to_lowercase().contains(&q))
         .collect();
 
-    // Clamp scroll: peripheral — only move when cursor leaves window
-    if cursor < state.overlay_scroll {
-        state.overlay_scroll = cursor;
-    } else if inner_height > 0 && cursor >= state.overlay_scroll + inner_height {
-        state.overlay_scroll = cursor + 1 - inner_height;
-    }
+    let (skip, take) = list.visible_window(inner_height);
+    let cursor = list.cursor;
 
     let visible: Vec<ListItem> = filtered.iter()
         .enumerate()
-        .skip(state.overlay_scroll)
-        .take(inner_height)
+        .skip(skip)
+        .take(take)
         .map(|(fi, (_, s))| {
             let item = ListItem::new(format!("  {}", s));
             if fi == cursor {
@@ -850,14 +860,23 @@ fn render_pick_list(
     f.render_widget(List::new(visible).block(block), list_area);
 
     if has_search {
+        let search_query = list.search_query().to_string();
+        let search_active = list.search_active();
         let search_area = Rect { y: list_area.y + list_area.height, height: 3, ..area };
-        render_search_bar(f, search_area, &state.overlay_search.clone(), state.overlay_search_active);
+        render_search_bar(f, search_area, &search_query, search_active);
     }
 }
 
 fn render_connection_manager(f: &mut Frame, state: &mut AppState) {
     let (tab, cursor) = match &state.mode {
-        Mode::ConnectionManager { tab, cursor } => (tab.clone(), *cursor),
+        Mode::ConnectionManager { tab, connections_list, saved_list, connectors_list } => {
+            let list = match tab {
+                ConnectionManagerTab::Connections => connections_list,
+                ConnectionManagerTab::Saved => saved_list,
+                ConnectionManagerTab::Connectors => connectors_list,
+            };
+            (tab.clone(), list.cursor)
+        }
         _ => return,
     };
 
@@ -1233,14 +1252,18 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn render_log_viewer(f: &mut Frame, state: &AppState) {
+fn render_log_viewer(f: &mut Frame, state: &mut AppState) {
     let area = centered_rect(80, 70, f.area());
     f.render_widget(Clear, area);
 
-    let cursor = match &state.mode {
-        Mode::LogViewer { cursor } => *cursor,
-        _ => 0,
+    let list = match &mut state.mode {
+        Mode::LogViewer { list } => list,
+        _ => return,
     };
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let (skip, _take) = list.visible_window(inner_height);
+    let cursor = list.cursor;
 
     let items: Vec<ListItem> = state
         .logs
@@ -1283,20 +1306,10 @@ fn render_log_viewer(f: &mut Frame, state: &AppState) {
                 .border_style(Style::default().fg(Color::Yellow)),
         );
 
-    // Scroll so cursor is visible
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let offset = if state.logs.is_empty() {
-        0
-    } else if cursor + 1 > inner_height {
-        cursor + 1 - inner_height
-    } else {
-        0
-    };
-
     use ratatui::widgets::ListState;
     let mut list_state = ListState::default();
     list_state.select(Some(cursor));
-    *list_state.offset_mut() = offset;
+    *list_state.offset_mut() = skip;
 
     f.render_stateful_widget(list, area, &mut list_state);
 }
@@ -1306,7 +1319,7 @@ fn render_manual_list(f: &mut Frame, state: &AppState) {
     f.render_widget(Clear, area);
 
     let cursor = match &state.mode {
-        Mode::ManualList { cursor } => *cursor,
+        Mode::ManualList { list } => list.cursor,
         _ => 0,
     };
 

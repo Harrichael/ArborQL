@@ -10,8 +10,6 @@ use std::collections::HashMap;
 pub struct DataNode {
     pub table: String,
     pub row: Row,
-    /// Columns to display (subset of row keys, in order).
-    pub visible_columns: Vec<String>,
     /// Child nodes related to this row.
     pub children: Vec<DataNode>,
     /// Whether this node is collapsed in the UI.
@@ -20,12 +18,9 @@ pub struct DataNode {
 
 impl DataNode {
     pub fn new(table: String, row: Row) -> Self {
-        let mut visible_columns: Vec<String> = row.keys().cloned().collect();
-        visible_columns.sort();
         Self {
             table,
             row,
-            visible_columns,
             children: Vec::new(),
             collapsed: false,
         }
@@ -39,9 +34,11 @@ impl DataNode {
                 return format!("{}: {}", candidate, val);
             }
         }
-        // Fall back to first visible column
-        if let Some(col) = self.visible_columns.first() {
-            if let Some(val) = self.row.get(col) {
+        // Fall back to first column alphabetically
+        let mut cols: Vec<&String> = self.row.keys().collect();
+        cols.sort();
+        if let Some(col) = cols.first() {
+            if let Some(val) = self.row.get(*col) {
                 return format!("{}: {}", col, val);
             }
         }
@@ -410,37 +407,7 @@ fn format_value_for_sql(val: &Value) -> String {
 }
 
 
-/// Flatten the data tree into a list of (depth, node_ref) for rendering.
-pub fn flatten_tree(roots: &[DataNode]) -> Vec<(usize, &DataNode)> {
-    let mut out = Vec::new();
-    for node in roots {
-        flatten_node(node, 0, &mut out);
-    }
-    out
-}
 
-fn flatten_node<'a>(
-    node: &'a DataNode,
-    depth: usize,
-    out: &mut Vec<(usize, &'a DataNode)>,
-) {
-    out.push((depth, node));
-    if !node.collapsed {
-        for child in &node.children {
-            flatten_node(child, depth + 1, out);
-        }
-    }
-}
-
-/// Collect all extra column names available for a node (those not in
-/// visible_columns).
-pub fn available_extra_columns(node: &DataNode) -> Vec<String> {
-    node.row
-        .keys()
-        .filter(|k| !node.visible_columns.contains(k))
-        .cloned()
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {
@@ -458,36 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flatten_tree_empty() {
-        let roots: Vec<DataNode> = vec![];
-        let flat = flatten_tree(&roots);
-        assert!(flat.is_empty());
-    }
-
-    #[test]
-    fn test_flatten_tree_nested() {
-        let mut parent = create_test_node("users", 1);
-        parent.children.push(create_test_node("orders", 10));
-        parent.children.push(create_test_node("orders", 11));
-        let roots = vec![parent];
-        let flat = flatten_tree(&roots);
-        assert_eq!(flat.len(), 3);
-        assert_eq!(flat[0].0, 0);
-        assert_eq!(flat[1].0, 1);
-        assert_eq!(flat[2].0, 1);
-    }
-
-    #[test]
-    fn test_flatten_collapsed() {
-        let mut parent = create_test_node("users", 1);
-        parent.collapsed = true;
-        parent.children.push(create_test_node("orders", 10));
-        let roots = vec![parent];
-        let flat = flatten_tree(&roots);
-        assert_eq!(flat.len(), 1); // children hidden
-    }
-
-    #[test]
     fn test_node_summary() {
         let mut row = HashMap::new();
         row.insert("id".to_string(), Value::Integer(42));
@@ -495,24 +432,6 @@ mod tests {
         let node = DataNode::new("users".to_string(), row);
         // "id" comes before "name" in candidates
         assert!(node.summary().contains("id") || node.summary().contains("name"));
-    }
-
-    #[test]
-    fn test_available_extra_columns_when_row_has_more_fields() {
-        let mut row = HashMap::new();
-        row.insert("id".to_string(), Value::Integer(1));
-        row.insert("name".to_string(), Value::Text("Alice".to_string()));
-        row.insert("email".to_string(), Value::Text("alice@example.com".to_string()));
-        row.insert("created_at".to_string(), Value::Text("2026-01-01".to_string()));
-
-        let node = DataNode::new("users".to_string(), row);
-        let mut extras = available_extra_columns(&node);
-        extras.sort();
-
-        assert!(
-            extras.is_empty(),
-            "with all columns visible by default, node-level extras should be empty"
-        );
     }
 
     /// Create an in-memory SQLite database with users/orders/products and

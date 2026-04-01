@@ -2,7 +2,8 @@ use crate::command_history::CommandHistory;
 use crate::connection_manager::ConnectionType;
 use crate::rules::Rule;
 use crate::engine::TablePath;
-use crate::schema::VirtualFkDef;
+use crate::schema::{self, VirtualFkDef};
+use crate::ui::select_list::SelectList;
 use std::collections::HashMap;
 
 /// Which field is active in the virtual FK creation form.
@@ -81,8 +82,8 @@ pub struct VirtualFkForm {
     pub to_table: String,
     /// Selected to_column value (empty = not yet chosen).
     pub to_column: String,
-    /// Cursor position within the active field's dropdown list.
-    pub cursor: usize,
+    /// Selection state for the active field's dropdown list.
+    pub list: SelectList,
     /// Live type-value options loaded from the DB when TypeValue is active.
     pub type_options: Vec<(String, i64)>,
 }
@@ -97,7 +98,7 @@ impl VirtualFkForm {
             type_value: String::new(),
             to_table: String::new(),
             to_column: String::new(),
-            cursor: 0,
+            list: SelectList::with_search(),
             type_options: Vec::new(),
         }
     }
@@ -108,6 +109,19 @@ impl VirtualFkForm {
             && !self.id_column.is_empty()
             && !self.to_table.is_empty()
             && !self.to_column.is_empty()
+    }
+
+    /// Build a `VirtualFkDef` from the form's current field values.
+    /// Empty type_column/type_value are mapped to `None`.
+    pub fn to_vfk_def(&self) -> schema::VirtualFkDef {
+        VirtualFkDef {
+            from_table: self.from_table.clone(),
+            type_column: if self.type_column.is_empty() { None } else { Some(self.type_column.clone()) },
+            type_value: if self.type_value.is_empty() { None } else { Some(self.type_value.clone()) },
+            id_column: self.id_column.clone(),
+            to_table: self.to_table.clone(),
+            to_column: self.to_column.clone(),
+        }
     }
 }
 
@@ -125,21 +139,21 @@ pub enum Mode {
     /// User is typing a command.
     Command,
     /// User is being asked to pick among multiple paths.
-    PathSelection,
+    PathSelection { list: SelectList },
     /// User is reordering rules.
-    RuleReorder,
+    RuleReorder { list: SelectList },
     /// Error message displayed.
     Error(String),
     /// Informational message displayed.
     Info(String),
     /// User is managing virtual FK definitions.
-    VirtualFkManager { cursor: usize },
+    VirtualFkManager { list: SelectList },
     /// User is filling the virtual FK creation form (single-screen, Tab-navigable).
     VirtualFkAdd(VirtualFkForm),
     /// User is viewing the internal log history.
-    LogViewer { cursor: usize },
+    LogViewer { list: SelectList },
     /// User is browsing the list of available manuals.
-    ManualList { cursor: usize },
+    ManualList { list: SelectList },
     /// User is reading a specific manual (index into MANUALS slice, scroll offset).
     ManualView { index: usize, scroll: usize },
     /// User is doing a reverse-i-search through command history.
@@ -160,7 +174,9 @@ pub enum Mode {
     /// User is browsing the connection manager.
     ConnectionManager {
         tab: ConnectionManagerTab,
-        cursor: usize,
+        connections_list: SelectList,
+        saved_list: SelectList,
+        connectors_list: SelectList,
     },
     /// User is filling the connection creation form.
     ConnectionAdd(ConnectionForm),
@@ -178,6 +194,18 @@ pub enum Mode {
 pub enum ConfirmAction {
     /// Save a single connection — user decides whether to include the password.
     SaveConnectionWithPassword { conn_index: usize },
+}
+
+impl Mode {
+    /// Create a ConnectionManager mode with the given tab and fresh cursors.
+    pub fn connection_manager(tab: ConnectionManagerTab) -> Self {
+        Mode::ConnectionManager {
+            tab,
+            connections_list: SelectList::new(),
+            saved_list: SelectList::new(),
+            connectors_list: SelectList::new(),
+        }
+    }
 }
 
 /// Which tab is active in the connection manager.
@@ -280,14 +308,10 @@ pub struct AppState {
     pub paths_has_more: bool,
     /// Depth to resume pathfinding from when `paths_has_more` is true.
     pub paths_next_depth: usize,
-    /// Currently highlighted path index.
-    pub path_cursor: usize,
     /// Table names from the schema, for display.
     pub table_names: Vec<String>,
     /// Rules list.
     pub rules: Vec<Rule>,
-    /// Selected rule index (for reorder mode).
-    pub rule_cursor: usize,
     /// Next insertion position for newly added rules.
     pub next_rule_cursor: usize,
     /// Undo stack for rule reorder mode snapshots: (rules, cursor, next cursor).
@@ -302,8 +326,8 @@ pub struct AppState {
     pub tree_visible_columns: HashMap<String, Vec<String>>,
     /// Full tree-level column ordering by table (enabled + disabled).
     pub tree_column_order: HashMap<String, Vec<String>>,
-    /// Column manager mode: table, editable list (ordered + enabled), cursor.
-    pub column_add: Option<(String, Vec<ColumnManagerItem>, usize)>,
+    /// Column manager mode: table, editable list (ordered + enabled), selection state.
+    pub column_add: Option<(String, Vec<ColumnManagerItem>, SelectList)>,
     /// Config-driven default visible columns.
     pub default_visible_columns: Vec<String>,
     /// Config-driven table-specific default visible columns.
@@ -312,12 +336,6 @@ pub struct AppState {
     pub virtual_fks: Vec<VirtualFkDef>,
     /// Internal log history (warnings, errors, info messages).
     pub logs: Vec<crate::log::LogEntry>,
-    /// Scroll offset shared by all list overlays (column manager, FK manager, etc.).
-    pub overlay_scroll: usize,
-    /// Live search/filter string for list overlays. Empty = no filter.
-    pub overlay_search: String,
-    /// Whether the search input is currently active (accepting keystrokes).
-    pub overlay_search_active: bool,
     /// Entered command history (append-only).
     pub command_history: CommandHistory,
     /// Index into `command_history` while browsing with Up/Down (None = not browsing).
@@ -349,10 +367,8 @@ impl AppState {
             paths: Vec::new(),
             paths_has_more: false,
             paths_next_depth: 1,
-            path_cursor: 0,
             table_names: Vec::new(),
             rules: Vec::new(),
-            rule_cursor: 0,
             next_rule_cursor: 0,
             rule_reorder_undo: Vec::new(),
             rule_reorder_redo: Vec::new(),
@@ -365,9 +381,6 @@ impl AppState {
             default_visible_columns_by_table: HashMap::new(),
             virtual_fks: Vec::new(),
             logs: Vec::new(),
-            overlay_scroll: 0,
-            overlay_search: String::new(),
-            overlay_search_active: false,
             command_history: CommandHistory::new(),
             history_cursor: None,
             history_draft: String::new(),
@@ -514,27 +527,6 @@ impl AppState {
         }
     }
 
-    /// Clear overlay search state (call when opening/closing a list overlay).
-    pub fn reset_overlay_search(&mut self) {
-        self.overlay_search.clear();
-        self.overlay_search_active = false;
-        self.overlay_scroll = 0;
-    }
-
-    /// Get the cursor in the current VirtualFkAdd form.
-    pub fn wizard_cursor(&self) -> usize {
-        match &self.mode {
-            Mode::VirtualFkAdd(form) => form.cursor,
-            _ => 0,
-        }
-    }
-
-    /// Update the cursor in the current VirtualFkAdd form.
-    pub fn wizard_set_cursor(&mut self, c: usize) {
-        if let Mode::VirtualFkAdd(form) = &mut self.mode {
-            form.cursor = c;
-        }
-    }
 
     /// Get text entered so far.
     pub fn input_text(&self) -> &str {
