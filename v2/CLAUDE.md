@@ -20,10 +20,16 @@
 - Refrain from very micro-unit tests; make each test really count.
 - Prefer fakes over mocks.
 - Lean toward integrated tests written as unit tests.
-- Some files may legitimately have few or no tests.
+- Some files may legitimately have few or no tests. Other times, tests
+  will effectively test multiple files.
 
 ## Architecture
 
+- As we build, flag architecture issues and concerns early and not later.
+- Pre-mature abstraction is very deadly to architecture just as pre-mature
+  optimization is deadly to benchmarking.
+- For architecture, think about the big O complexity of engineering effort
+  of modification with respect to plausible app features.
 - Pay special attention to the "telos" of a module, file, class, struct,
   function, etc. The Telos, the purpose that is, is the guiding north star
   of what belongs there and what doesn't. What should "know" about what?
@@ -33,15 +39,12 @@
   shape to do it under.
 - Exposing implementation details is inevitable in many cases, like a
   field being a Vec or so forth. Coupling Telos or Knowledge is the thing
-  to flag.
+  to flag, not necessarily "implementation" details.
 - Telos governs data shape; YAGNI governs API surface. Get the shape
   right now (where data lives, who owns what), but only implement the
   methods a real caller needs. The check: would a plausible future need
   force restructuring the data, or just adding a method? If restructure,
   the shape is wrong.
-- As we build, flag architecture issues and concerns early and not later.
-- Pre-mature abstraction is very deadly to architecture just as pre-mature
-  optimization is deadly to benchmarking.
 
 ## Rust
 
