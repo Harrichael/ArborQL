@@ -31,6 +31,15 @@
   changing the interface or Telos, then its the wrong interface. We don't
   have to do the optimization right away, but it needs to be the right
   shape to do it under.
+- Exposing implementation details is inevitable in many cases, like a
+  field being a Vec or so forth. Coupling Telos or Knowledge is the thing
+  to flag.
+- Telos governs data shape; YAGNI governs API surface. Get the shape
+  right now (where data lives, who owns what), but only implement the
+  methods a real caller needs. The check: would a plausible future need
+  force restructuring the data, or just adding a method? If restructure,
+  the shape is wrong.
+- As we build, flag architecture issues and concerns early and not later.
 
 ## Rust
 
