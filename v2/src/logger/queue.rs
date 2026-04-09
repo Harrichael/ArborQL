@@ -1,12 +1,3 @@
-//! Thread-safe global log queue. Records are pushed via the `log!` macro
-//! (which captures file/line at the call site) and read back as a snapshot
-//! by consumers like an in-app viewer or a file sink.
-//!
-//! ```ignore
-//! log!(Level::Info, "loaded {} rows", row_count);
-//! let recent = logger::snapshot();
-//! ```
-
 use std::sync::Mutex;
 use std::thread::ThreadId;
 use std::time::SystemTime;
@@ -86,7 +77,7 @@ mod tests {
         assert_eq!(after.len() - before, 8 * 50);
 
         let new_records = &after[before..];
-        assert!(new_records.iter().all(|r| r.file.ends_with("logger.rs")));
+        assert!(new_records.iter().all(|r| r.file.ends_with("queue.rs")));
         assert!(new_records.iter().all(|r| r.line > 0));
         assert!(new_records.iter().all(|r| matches!(r.level, Level::Info)));
 
