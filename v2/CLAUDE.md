@@ -22,6 +22,16 @@
 - Lean toward integrated tests written as unit tests.
 - Some files may legitimately have few or no tests.
 
+## Architecture
+
+- Pay special attention to the "telos" of a module, file, class, struct,
+  function, etc. The Telos, the purpose that is, is the guiding north star
+  of what belongs there and what doesn't. What should "know" about what?
+- If a fundamental interface cannot be optimized without completely
+  changing the interface or Telos, then its the wrong interface. We don't
+  have to do the optimization right away, but it needs to be the right
+  shape to do it under.
+
 ## Rust
 
 - `mod.rs` should only contain `mod` declarations and `pub use`
